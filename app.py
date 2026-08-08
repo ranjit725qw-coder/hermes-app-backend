@@ -5,11 +5,10 @@ from flask_cors import CORS
 
 app = Flask(__name__)
 
-# Browser access is controlled by the Render environment variable.
-# Example:
-# API_SERVER_CORS_ORIGINS=https://your-frontend.example.com
-CORS(app, origins=os.getenv("API_SERVER_CORS_ORIGINS", "*").split(","))
+# অ্যাপ যাতে ব্লক না হয় তার জন্য CORS চালু করা হলো
+CORS(app)
 
+# আসল Hermes Agent-এর লোকাল ঠিকানা
 HERMES_URL = os.getenv("HERMES_LOCAL_URL", "http://127.0.0.1:8642")
 HERMES_KEY = os.getenv("API_SERVER_KEY")
 
@@ -20,8 +19,8 @@ if not HERMES_KEY:
 def home():
     return jsonify({
         "status": "ok",
-        "backend": "Hermes Agent",
-        "mode": "real-hermes-agent"
+        "backend": "Real Hermes Agent",
+        "message": "System is live and running autonomously!"
     }), 200
 
 @app.route("/health", methods=["GET"])
@@ -32,10 +31,13 @@ def health():
     except Exception as e:
         return jsonify({"status": "error", "detail": str(e)}), 503
 
-@app.route("/chat", methods=["POST"])
+@app.route("/chat", methods=["POST", "OPTIONS"])
 def chat():
+    # CORS প্রিফ্লাইট রিকোয়েস্ট হ্যান্ডেল করা
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
     data = request.get_json(silent=True) or {}
-    user_id = str(data.get("user_id", "default_user"))
     user_message = str(data.get("message", "")).strip()
 
     if not user_message:
@@ -44,71 +46,46 @@ def chat():
     if not HERMES_KEY:
         return jsonify({"error": "Hermes API server key is not configured"}), 500
 
-    # The browser frontend can keep using its existing /chat contract.
-    # This proxy forwards the request to the REAL Hermes Agent API.
     headers = {
         "Authorization": f"Bearer {HERMES_KEY}",
-        "Content-Type": "application/json",
-        "X-Hermes-Session-Key": f"web:{user_id}",
+        "Content-Type": "application/json"
     }
 
+    # ডেভেলপারের নির্দেশ অনুযায়ী OpenAI-compatible পেলোড (Payload) তৈরি
     payload = {
         "model": "hermes-agent",
-        "input": user_message,
-        "conversation": f"web:{user_id}",
-        "store": True,
+        "messages": [
+            {"role": "user", "content": user_message}
+        ]
     }
 
     try:
+        # OpenRouter-এর বদলে সরাসরি লোকাল Hermes Agent-এ রিকোয়েস্ট পাঠানো হচ্ছে
         response = requests.post(
-            f"{HERMES_URL}/v1/responses",
+            f"{HERMES_URL}/v1/chat/completions",
             headers=headers,
             json=payload,
             timeout=180,
         )
-    except requests.RequestException as e:
+        
+        if response.status_code >= 400:
+            return jsonify({
+                "error": "Hermes Agent returned an error.",
+                "detail": response.text
+            }), 502
+            
+        result = response.json()
+        
+        # সফলভাবে মেসেজ এক্সট্র্যাক্ট করা
+        reply = result["choices"][0]["message"]["content"]
+        
+        return jsonify({"reply": reply}), 200
+
+    except Exception as e:
         return jsonify({
-            "error": "Could not connect to the Hermes Agent runtime.",
+            "error": "Could not connect to the local Hermes Agent.",
             "detail": str(e)
         }), 503
-
-    if response.status_code >= 400:
-        return jsonify({
-            "error": "Hermes Agent returned an error.",
-            "status": response.status_code,
-            "detail": response.text[:4000],
-        }), 502
-
-    try:
-        result = response.json()
-    except ValueError:
-        return jsonify({"error": "Invalid response from Hermes Agent"}), 502
-
-    # Extract the final assistant text from the Responses API result.
-    reply_parts = []
-    for item in result.get("output", []):
-        if item.get("type") != "message":
-            continue
-        for content in item.get("content", []):
-            if content.get("type") in ("output_text", "text"):
-                text = content.get("text")
-                if text:
-                    reply_parts.append(text)
-
-    reply = "\n".join(reply_parts).strip()
-
-    if not reply:
-        return jsonify({
-            "error": "Hermes Agent completed without returning assistant text.",
-            "response_id": result.get("id")
-        }), 502
-
-    return jsonify({
-        "reply": reply,
-        "response_id": result.get("id"),
-        "model": result.get("model", "hermes-agent")
-    }), 200
-
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
