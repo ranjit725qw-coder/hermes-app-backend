@@ -13,8 +13,8 @@ export API_SERVER_KEY="${API_SERVER_KEY:?Set API_SERVER_KEY in Render Environmen
 # talks to the Flask proxy. The proxy handles CORS.
 export API_SERVER_CORS_ORIGINS=""
 
-# Start the REAL Hermes Agent gateway in the background.
-hermes gateway > /tmp/hermes-agent.log 2>&1 &
+# Start the REAL Hermes Agent gateway in the background using the corrected command.
+hermes gateway run > /tmp/hermes-agent.log 2>&1 &
 HERMES_PID=$!
 
 # Wait until Hermes is actually ready.
