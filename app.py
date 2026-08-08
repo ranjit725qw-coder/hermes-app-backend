@@ -1,9 +1,12 @@
 import os
 import requests
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from supabase import create_client, Client
 
 app = Flask(__name__)
+# CORS যুক্ত করার ফলে অ্যাপ যেকোনো জায়গা থেকে API কল রিসিভ করতে পারবে
+CORS(app)
 
 # Environment Variables
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
