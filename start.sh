@@ -1,19 +1,12 @@
 #!/usr/bin/env bash
 set -e
 
-# জিপ করা ব্যাকআপ ফাইলটি থেকে হুবহু সবকিছু রিস্টোর করা হচ্ছে (symlinks সহ)
-if [ -f "$PWD/hermes_backup.tar.gz" ]; then
-    echo "Restoring Hermes environment from tar backup..."
-    tar -xzf "$PWD/hermes_backup.tar.gz" -C "$HOME"
-fi
-
+# Render-কে বলা হচ্ছে প্রজেক্ট ফোল্ডারটিকেই HOME হিসেবে ধরতে
+export HOME="$PWD"
 export PATH="$HOME/.local/bin:$PATH"
 
-# এক্সিকিউটেবল পারমিশন নিশ্চিত করা
-chmod +x "$HOME/.local/bin/hermes" || true
-
 if ! command -v hermes &> /dev/null; then
-    echo "ERROR: hermes command still not found."
+    echo "ERROR: hermes command not found."
     exit 1
 fi
 
@@ -46,5 +39,4 @@ if ! curl -fsS "http://127.0.0.1:${API_SERVER_PORT}/health" >/dev/null 2>&1; the
 fi
 
 echo "Real Hermes Agent is ready."
-
 exec gunicorn --bind "0.0.0.0:${PORT:-10000}" --workers 1 --timeout 240 app:app
