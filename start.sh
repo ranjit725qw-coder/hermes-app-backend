@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 set -e
 
-export PATH="$HOME/.local/bin:$PATH"
+# Hermes-এর কথামতো .bashrc ফাইলটি লোড করা হচ্ছে যাতে সে hermes কমান্ড খুঁজে পায়
+if [ -f "$HOME/.bashrc" ]; then
+    source "$HOME/.bashrc"
+fi
 
-# Check if Hermes was actually installed
-if [ ! -x "$HOME/.local/bin/hermes" ]; then
-  echo "ERROR: Hermes executable was not installed at ~/.local/bin/hermes"
-  echo "PATH=$PATH"
-  ls -la "$HOME/.local/bin" || true
-  exit 1
+# ব্যাকআপ হিসেবে অন্যান্য সম্ভাব্য ফোল্ডারগুলোকেও চেনার উপায় দেওয়া হলো
+export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
+
+# চেক করা হচ্ছে hermes কমান্ড এখন কাজ করছে কি না
+if ! command -v hermes &> /dev/null; then
+    echo "ERROR: hermes command still not found."
+    echo "Checking ~/.hermes directory:"
+    ls -la "$HOME/.hermes" || true
+    exit 1
 fi
 
 export API_SERVER_ENABLED="${API_SERVER_ENABLED:-true}"
@@ -17,8 +23,8 @@ export API_SERVER_PORT="${API_SERVER_PORT:-8642}"
 export API_SERVER_KEY="${API_SERVER_KEY:?Set API_SERVER_KEY in Render Environment Variables}"
 export API_SERVER_CORS_ORIGINS=""
 
-# Start the REAL Hermes Agent gateway in the background
-"$HOME/.local/bin/hermes" gateway run > /tmp/hermes-agent.log 2>&1 &
+echo "Starting Real Hermes Gateway..."
+hermes gateway run > /tmp/hermes-agent.log 2>&1 &
 HERMES_PID=$!
 
 # Wait until Hermes is actually ready.
