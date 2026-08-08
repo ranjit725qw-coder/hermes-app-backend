@@ -1,23 +1,16 @@
 #!/usr/bin/env bash
 set -e
 
-# ১. ~/.hermes ফোল্ডার রিস্টোর করা হচ্ছে
-if [ ! -d "$HOME/.hermes" ] && [ -d "$PWD/hermes_backup" ]; then
-    echo "Restoring .hermes from backup..."
-    cp -a "$PWD/hermes_backup" "$HOME/.hermes"
+# জিপ করা ব্যাকআপ ফাইলটি থেকে হুবহু সবকিছু রিস্টোর করা হচ্ছে (symlinks সহ)
+if [ -f "$PWD/hermes_backup.tar.gz" ]; then
+    echo "Restoring Hermes environment from tar backup..."
+    tar -xzf "$PWD/hermes_backup.tar.gz" -C "$HOME"
 fi
 
-# ২. ~/.local/bin (যেখানে আসল hermes কমান্ড থাকে) রিস্টোর করা হচ্ছে
-if [ ! -f "$HOME/.local/bin/hermes" ] && [ -d "$PWD/local_bin_backup" ]; then
-    echo "Restoring .local/bin from backup..."
-    mkdir -p "$HOME/.local/bin"
-    cp -a "$PWD/local_bin_backup"/* "$HOME/.local/bin/"
-    # এক্সিকিউটেবল পারমিশন দেওয়া হচ্ছে যাতে রান করতে পারে
-    chmod +x "$HOME/.local/bin/hermes" || true
-fi
-
-# কমান্ডটি যাতে কাজ করে তার জন্য PATH সেট করা
 export PATH="$HOME/.local/bin:$PATH"
+
+# এক্সিকিউটেবল পারমিশন নিশ্চিত করা
+chmod +x "$HOME/.local/bin/hermes" || true
 
 if ! command -v hermes &> /dev/null; then
     echo "ERROR: hermes command still not found."
@@ -34,7 +27,6 @@ echo "Starting Real Hermes Gateway..."
 hermes gateway run > /tmp/hermes-agent.log 2>&1 &
 HERMES_PID=$!
 
-# Wait until Hermes is actually ready.
 for i in $(seq 1 60); do
   if curl -fsS "http://127.0.0.1:${API_SERVER_PORT}/health" >/dev/null 2>&1; then
     break
