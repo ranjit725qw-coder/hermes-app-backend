@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 set -e
 
-# Hermes-এর কথামতো .bashrc ফাইলটি লোড করা হচ্ছে যাতে সে hermes কমান্ড খুঁজে পায়
-if [ -f "$HOME/.bashrc" ]; then
-    source "$HOME/.bashrc"
+# Render-এর রানটাইম কন্টেইনারে ~/.hermes ফোল্ডারটি ব্যাকআপ থেকে রিস্টোর করা হচ্ছে
+if [ ! -d "$HOME/.hermes" ] && [ -d "$PWD/hermes_backup" ]; then
+    echo "Restoring Hermes from backup..."
+    cp -a "$PWD/hermes_backup" "$HOME/.hermes"
 fi
 
-# ব্যাকআপ হিসেবে অন্যান্য সম্ভাব্য ফোল্ডারগুলোকেও চেনার উপায় দেওয়া হলো
-export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
+# সরাসরি আসল এক্সিকিউটেবল ফাইলটি ব্যবহার করা হচ্ছে
+HERMES_BIN="$HOME/.hermes/hermes-agent"
 
-# চেক করা হচ্ছে hermes কমান্ড এখন কাজ করছে কি না
-if ! command -v hermes &> /dev/null; then
-    echo "ERROR: hermes command still not found."
-    echo "Checking ~/.hermes directory:"
+if [ ! -x "$HERMES_BIN" ]; then
+    echo "ERROR: Hermes executable not found at $HERMES_BIN"
     ls -la "$HOME/.hermes" || true
     exit 1
 fi
@@ -24,7 +23,7 @@ export API_SERVER_KEY="${API_SERVER_KEY:?Set API_SERVER_KEY in Render Environmen
 export API_SERVER_CORS_ORIGINS=""
 
 echo "Starting Real Hermes Gateway..."
-hermes gateway run > /tmp/hermes-agent.log 2>&1 &
+"$HERMES_BIN" gateway run > /tmp/hermes-agent.log 2>&1 &
 HERMES_PID=$!
 
 # Wait until Hermes is actually ready.
