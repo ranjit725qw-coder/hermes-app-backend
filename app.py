@@ -5,10 +5,9 @@ from flask_cors import CORS
 
 app = Flask(__name__)
 
-# অ্যাপ যাতে ব্লক না হয় তার জন্য CORS চালু করা হলো
+# CORS স্বয়ংক্রিয়ভাবে সব হেডার যুক্ত করবে (ম্যানুয়াল কোনো ঝুট-ঝামেলা নেই)
 CORS(app)
 
-# আসল Hermes Agent-এর লোকাল ঠিকানা
 HERMES_URL = os.getenv("HERMES_LOCAL_URL", "http://127.0.0.1:8642")
 HERMES_KEY = os.getenv("API_SERVER_KEY")
 
@@ -19,8 +18,7 @@ if not HERMES_KEY:
 def home():
     return jsonify({
         "status": "ok",
-        "backend": "Real Hermes Agent",
-        "message": "System is live and running autonomously!"
+        "backend": "Real Hermes Agent"
     }), 200
 
 @app.route("/health", methods=["GET"])
@@ -31,12 +29,9 @@ def health():
     except Exception as e:
         return jsonify({"status": "error", "detail": str(e)}), 503
 
-@app.route("/chat", methods=["POST", "OPTIONS"])
+# এখান থেকে OPTIONS সরিয়ে নেওয়া হয়েছে
+@app.route("/chat", methods=["POST"])
 def chat():
-    # CORS প্রিফ্লাইট রিকোয়েস্ট হ্যান্ডেল করা
-    if request.method == "OPTIONS":
-        return jsonify({}), 200
-
     data = request.get_json(silent=True) or {}
     user_message = str(data.get("message", "")).strip()
 
@@ -51,7 +46,6 @@ def chat():
         "Content-Type": "application/json"
     }
 
-    # ডেভেলপারের নির্দেশ অনুযায়ী OpenAI-compatible পেলোড (Payload) তৈরি
     payload = {
         "model": "hermes-agent",
         "messages": [
@@ -60,7 +54,6 @@ def chat():
     }
 
     try:
-        # OpenRouter-এর বদলে সরাসরি লোকাল Hermes Agent-এ রিকোয়েস্ট পাঠানো হচ্ছে
         response = requests.post(
             f"{HERMES_URL}/v1/chat/completions",
             headers=headers,
@@ -75,8 +68,6 @@ def chat():
             }), 502
             
         result = response.json()
-        
-        # সফলভাবে মেসেজ এক্সট্র্যাক্ট করা
         reply = result["choices"][0]["message"]["content"]
         
         return jsonify({"reply": reply}), 200
