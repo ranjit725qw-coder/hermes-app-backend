@@ -6,6 +6,10 @@ export PATH="$HOME/.local/bin:$PATH"
 
 echo "Applying official custom provider configuration for Groq..."
 
+# পাইথনের YAML মডিউলটি ইনস্টল করা হচ্ছে
+pip install PyYAML
+
+# পাইথন ব্যবহার করে config.yaml আপডেট করা হচ্ছে
 python3 -c '
 import yaml, os
 config_path = os.path.join(os.environ.get("HOME"), ".hermes/config.yaml")
@@ -15,7 +19,6 @@ try:
 except FileNotFoundError:
     config = {}
 
-# Official schema per user verification
 config["custom_providers"] = [{
     "name": "groq",
     "base_url": "https://api.groq.com/openai/v1",
