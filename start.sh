@@ -4,10 +4,7 @@ set -e
 export HOME="$PWD"
 export PATH="$HOME/.local/bin:$PATH"
 
-echo "Applying official custom provider configuration for Groq..."
-
-# পাইথনের YAML মডিউলটি ইনস্টল করা হচ্ছে
-pip install PyYAML
+echo "Applying official custom provider configuration for Groq with 131k context..."
 
 # পাইথন ব্যবহার করে config.yaml আপডেট করা হচ্ছে
 python3 -c '
@@ -19,16 +16,23 @@ try:
 except FileNotFoundError:
     config = {}
 
+# User specified exact schema mapping for custom provider and context length
 config["custom_providers"] = [{
     "name": "groq",
     "base_url": "https://api.groq.com/openai/v1",
-    "key_env": "GROQ_API_KEY"
+    "key_env": "GROQ_API_KEY",
+    "models": {
+        "openai/gpt-oss-120b": {
+            "context_length": 131072
+        }
+    }
 }]
 
-if "model" not in config:
-    config["model"] = {}
-config["model"]["default"] = "openai/gpt-oss-120b"
-config["model"]["provider"] = "custom:groq"
+config["model"] = {
+    "default": "openai/gpt-oss-120b",
+    "provider": "custom:groq",
+    "context_length": 131072
+}
 
 os.makedirs(os.path.dirname(config_path), exist_ok=True)
 with open(config_path, "w") as f:
@@ -71,8 +75,8 @@ fi
 
 echo "Real Hermes Agent is ready."
 
-echo "=== CURRENT HERMES CONFIGURATION ==="
+echo "=== VERIFYING EFFECTIVE HERMES RUNTIME CONFIGURATION ==="
 cat "$HOME/.hermes/config.yaml"
-echo "===================================="
+echo "========================================================"
 
 exec gunicorn --bind "0.0.0.0:${PORT:-10000}" --workers 1 --timeout 240 app:app
