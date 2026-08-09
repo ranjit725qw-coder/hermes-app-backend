@@ -4,15 +4,34 @@ set -e
 export HOME="$PWD"
 export PATH="$HOME/.local/bin:$PATH"
 
-# --- FORCE CONFIGURATION OVERRIDE ---
-CONFIG_FILE="$HOME/.hermes/config.yaml"
-if [ -f "$CONFIG_FILE" ]; then
-    echo "Applying emergency configuration override for OpenRouter Free..."
-    # পুরোনো মডেল এবং টোকেন রিপ্লেস করা হচ্ছে
-    sed -i 's|anthropic/claude-opus-4.6|openrouter/free|g' "$CONFIG_FILE"
-    sed -i 's/128000/2048/g' "$CONFIG_FILE"
-fi
-# ------------------------------------
+echo "Applying official custom provider configuration for Groq..."
+
+python3 -c '
+import yaml, os
+config_path = os.path.join(os.environ.get("HOME"), ".hermes/config.yaml")
+try:
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f) or {}
+except FileNotFoundError:
+    config = {}
+
+# Official schema per user verification
+config["custom_providers"] = [{
+    "name": "groq",
+    "base_url": "https://api.groq.com/openai/v1",
+    "key_env": "GROQ_API_KEY"
+}]
+
+if "model" not in config:
+    config["model"] = {}
+config["model"]["default"] = "openai/gpt-oss-120b"
+config["model"]["provider"] = "custom:groq"
+
+os.makedirs(os.path.dirname(config_path), exist_ok=True)
+with open(config_path, "w") as f:
+    yaml.safe_dump(config, f)
+print("Configuration successfully written to config.yaml")
+'
 
 if ! command -v hermes &> /dev/null; then
     echo "ERROR: hermes command not found."
@@ -48,4 +67,9 @@ if ! curl -fsS "http://127.0.0.1:${API_SERVER_PORT}/health" >/dev/null 2>&1; the
 fi
 
 echo "Real Hermes Agent is ready."
+
+echo "=== CURRENT HERMES CONFIGURATION ==="
+cat "$HOME/.hermes/config.yaml"
+echo "===================================="
+
 exec gunicorn --bind "0.0.0.0:${PORT:-10000}" --workers 1 --timeout 240 app:app
