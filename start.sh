@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 set -e
 
-# Render-কে বলা হচ্ছে প্রজেক্ট ফোল্ডারটিকেই HOME হিসেবে ধরতে
 export HOME="$PWD"
 export PATH="$HOME/.local/bin:$PATH"
+
+# --- FORCE CONFIGURATION OVERRIDE ---
+CONFIG_FILE="$HOME/.hermes/config.yaml"
+if [ -f "$CONFIG_FILE" ]; then
+    echo "Applying emergency configuration override for OpenRouter Free..."
+    # পুরোনো মডেল এবং টোকেন রিপ্লেস করা হচ্ছে
+    sed -i 's|anthropic/claude-opus-4.6|openrouter/free|g' "$CONFIG_FILE"
+    sed -i 's/128000/2048/g' "$CONFIG_FILE"
+fi
+# ------------------------------------
 
 if ! command -v hermes &> /dev/null; then
     echo "ERROR: hermes command not found."
