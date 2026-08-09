@@ -4,8 +4,6 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-
-# CORS স্বয়ংক্রিয়ভাবে সব হেডার যুক্ত করবে (ম্যানুয়াল কোনো ঝুট-ঝামেলা নেই)
 CORS(app)
 
 HERMES_URL = os.getenv("HERMES_LOCAL_URL", "http://127.0.0.1:8642")
@@ -18,7 +16,8 @@ if not HERMES_KEY:
 def home():
     return jsonify({
         "status": "ok",
-        "backend": "Real Hermes Agent"
+        "backend": "Real Hermes Agent",
+        "model": "openrouter/free"
     }), 200
 
 @app.route("/health", methods=["GET"])
@@ -29,7 +28,6 @@ def health():
     except Exception as e:
         return jsonify({"status": "error", "detail": str(e)}), 503
 
-# এখান থেকে OPTIONS সরিয়ে নেওয়া হয়েছে
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json(silent=True) or {}
@@ -46,8 +44,10 @@ def chat():
         "Content-Type": "application/json"
     }
 
+    # জোরপূর্বক মডেল এবং ম্যাক্স টোকেন সেট করা হলো
     payload = {
-        "model": "hermes-agent",
+        "model": "openrouter/free",
+        "max_tokens": 2048,
         "messages": [
             {"role": "user", "content": user_message}
         ]
