@@ -17,7 +17,9 @@ def home():
     return jsonify({
         "status": "ok",
         "backend": "Real Hermes Agent",
-        "model": "openrouter/free"
+        "model": "openai/gpt-oss-120b",
+        "provider": "custom:groq",
+        "base_url": "https://api.groq.com/openai/v1"
     }), 200
 
 @app.route("/health", methods=["GET"])
@@ -43,11 +45,9 @@ def chat():
         "Authorization": f"Bearer {HERMES_KEY}",
         "Content-Type": "application/json"
     }
-
-    # জোরপূর্বক মডেল এবং ম্যাক্স টোকেন সেট করা হলো
+    
     payload = {
-        "model": "openrouter/free",
-        "max_tokens": 2048,
+        "model": "openai/gpt-oss-120b",
         "messages": [
             {"role": "user", "content": user_message}
         ]
