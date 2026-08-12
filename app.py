@@ -9,7 +9,7 @@ CORS(app)
 HERMES_URL = os.getenv("HERMES_LOCAL_URL", "http://127.0.0.1:8642")
 HERMES_KEY = os.getenv("API_SERVER_KEY")
 
-MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = "gemini-3.5-flash"
 
 if not HERMES_KEY:
     print("WARNING: API_SERVER_KEY is not configured.")

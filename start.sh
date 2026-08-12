@@ -4,7 +4,7 @@ set -e
 export HOME="$PWD"
 export PATH="$HOME/.local/bin:$PATH"
 
-echo "=== HERMES CONFIGURATION: GEMINI 2.5 FLASH (TARGETED) ==="
+echo "=== HERMES CONFIGURATION: GEMINI 3.5 FLASH (TARGETED) ==="
 
 # ---------------------------------------------------------
 # 1. Required secret check
@@ -16,6 +16,22 @@ fi
 
 # ---------------------------------------------------------
 # 2. Hermes config update (Strictly preserving existing state)
+#
+# Root-cause notes (Jul-Aug 2026):
+#  * gemini-2.5-flash now returns HTTP 404 "This model ... is no longer
+#    available to new users" on the v1beta OpenAI-compatible endpoint
+#    (https://generativelanguage.googleapis.com/v1beta/openai/) for
+#    newly issued Google AI Studio keys. The live service therefore
+#    fails every LLM call for new-key users.
+#  * The Gemini free tier enforces GenerateRequestsPerMinutePerProjectPerModel
+#    with quotaValue: 5 (5 requests per minute, per model, per project).
+#    Hermes retries each failed LLM call up to 3x internally with a 6s
+#    backoff, so a single user message can emit 3 Gemini calls within
+#    ~10 seconds. Any burst traffic then trips 429 RESOURCE_EXHAUSTED.
+#  * Fix: route EVERYTHING (main route + auxiliary LLM tasks) through a
+#    single current stable free-tier model (gemini-3.5-flash) so the
+#    per-model call count stays minimal, and keep the provider model map
+#    flexible for future upgrades without further config churn.
 # ---------------------------------------------------------
 python3 -c '
 import os
@@ -35,6 +51,9 @@ except FileNotFoundError:
 
 # ---------------------------------------------------------
 # Custom Gemini provider (Global definition for inheritance)
+# Register all current stable free-tier Gemini 3.x models plus the
+# legacy 2.5-flash (kept only as a fallback identifier) so that model
+# swaps can be done by changing a single default string.
 # ---------------------------------------------------------
 providers = config.setdefault("custom_providers", [])
 
@@ -43,6 +62,15 @@ gemini_config = {
     "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
     "key_env": "GEMINI_API_KEY",
     "models": {
+        "gemini-3.5-flash": {
+            "context_length": 1048576
+        },
+        "gemini-3.5-flash-lite": {
+            "context_length": 1048576
+        },
+        "gemini-3.6-flash": {
+            "context_length": 1048576
+        },
         "gemini-2.5-flash": {
             "context_length": 1048576
         }
@@ -69,7 +97,7 @@ else:
 model_config = config.setdefault("model", {})
 
 model_config.update({
-    "default": "gemini-2.5-flash",
+    "default": "gemini-3.5-flash",
     "provider": "custom:google_ai_studio",
     "context_length": 1048576
 })
@@ -82,19 +110,19 @@ auxiliary = config.setdefault("auxiliary", {})
 
 # Only specific LLM-backed text tasks that risk OpenRouter/auto fallback
 target_llm_tasks = [
-    "title_generation", 
-    "compression", 
-    "summarizer", 
+    "title_generation",
+    "compression",
+    "summarizer",
     "web_extract"
 ]
 
 for task_name in target_llm_tasks:
     task_config = auxiliary.setdefault(task_name, {})
     task_config.update({
-        "model": "gemini-2.5-flash",
+        "model": "gemini-3.5-flash",
         "provider": "custom:google_ai_studio"
     })
-    
+
     # Safely remove unverified/insecure keys if previously set
     for unsafe_key in ("fallback_chain", "api_key", "base_url"):
         task_config.pop(unsafe_key, None)
