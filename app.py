@@ -3,6 +3,8 @@ import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+from auth import get_auth_header_claims
+
 app = Flask(__name__)
 CORS(app)
 
@@ -16,6 +18,42 @@ MODEL_NAME = "deepseek.v3.2"
 
 if not HERMES_KEY:
     print("WARNING: API_SERVER_KEY is not configured.")
+
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL") or "https://bjoljeysryycwflhcnha.supabase.co"
+
+
+def _record_authenticated_chat(user_id, user_message, bot_reply):
+    """
+    Optionally record an authenticated chat turn in the existing
+    chat_memory table (Supabase `hermes-memory-db`).
+
+    Anonymous (no token) requests never reach this function, so legacy
+    anonymous behavior is unchanged. Failures here are logged but never
+    break the chat response.
+    """
+    if not SUPABASE_SERVICE_ROLE_KEY or not user_id:
+        return
+    try:
+        requests.post(
+            f"{SUPABASE_URL.rstrip('/')}/rest/v1/chat_memory",
+            headers={
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                "apikey": SUPABASE_ANON_KEY or "",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            json={
+                "user_id": user_id,
+                "user_message": user_message,
+                "bot_reply": bot_reply,
+            },
+            timeout=20,
+        )
+    except Exception:
+        # Recording is best-effort; the chat reply already succeeded.
+        pass
 
 @app.route("/", methods=["GET"])
 def home():
@@ -109,7 +147,25 @@ def chat():
                 "detail": result
             }), 502
 
-        return jsonify({"reply": reply}), 200
+        # Phase 3-A: optional identity layer.
+        # Anonymous requests (no Authorization header) flow through exactly
+        # as before. Authenticated requests carry a validated Supabase JWT;
+        # we additionally record the turn under auth.uid in chat_memory.
+        auth_mode = "anonymous"
+        try:
+            claims, auth_err = get_auth_header_claims(request)
+            if auth_err:
+                return jsonify({"error": "Invalid authentication token.", "detail": auth_err}), 401
+            if claims:
+                auth_mode = "authenticated"
+                record_uid = claims.get("sub") or claims.get("user_id")
+                if record_uid:
+                    _record_authenticated_chat(record_uid, user_message, reply)
+        except Exception:
+            # Never break chat on identity-layer exceptions.
+            pass
+
+        return jsonify({"reply": reply, "auth_mode": auth_mode}), 200
 
     except requests.Timeout:
         return jsonify({"error": "Hermes Agent request timed out."}), 504
@@ -123,6 +179,31 @@ def chat():
             "error": "Unexpected server error.",
             "detail": str(exc)
         }), 500
+
+
+@app.route("/auth/verify", methods=["GET"])
+def auth_verify():
+    """
+    Validate the caller's Supabase access token and return identity claims.
+
+    * Valid Bearer token    -> 200 {uid, email, role, expires_at}
+    * No token (anonymous)  -> 200 {auth_mode: "anonymous"}
+    * Invalid/expired token -> 401 {error}
+
+    The token value is never logged or echoed.
+    """
+    claims, err = get_auth_header_claims(request)
+    if err:
+        return jsonify({"error": err}), 401
+    if not claims:
+        return jsonify({"auth_mode": "anonymous"}), 200
+    return jsonify({
+        "auth_mode": "authenticated",
+        "uid": claims.get("sub"),
+        "email": claims.get("email"),
+        "role": claims.get("role"),
+        "expires_at": claims.get("exp"),
+    }), 200
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
