@@ -9,7 +9,10 @@ CORS(app)
 HERMES_URL = os.getenv("HERMES_LOCAL_URL", "http://127.0.0.1:8642")
 HERMES_KEY = os.getenv("API_SERVER_KEY")
 
-MODEL_NAME = "gemini-3.5-flash"
+# ACTIVE model (Amazon Bedrock, verified Aug 13 2026):
+MODEL_NAME = "deepseek.v3.2"
+# GEMINI (preserved, deactivated — re-enable by swapping):
+# MODEL_NAME = "gemini-3.5-flash"
 
 if not HERMES_KEY:
     print("WARNING: API_SERVER_KEY is not configured.")
@@ -20,7 +23,7 @@ def home():
         "status": "ok",
         "backend": "Real Hermes Agent",
         "model": MODEL_NAME,
-        "provider": "custom:google_ai_studio"
+        "provider": "custom:bedrock_mantle"
     }), 200
 
 @app.route("/health", methods=["GET"])
@@ -55,7 +58,8 @@ def chat():
     }
 
     # REST Payload strictly utilizing the explicit model string.
-    # Provider mapping handles resolving to Google AI Studio seamlessly.
+    # Provider mapping handles resolving to Amazon Bedrock
+    # (bedrock-mantle Chat Completions) seamlessly.
     payload = {
         "model": MODEL_NAME,
         "messages": [
