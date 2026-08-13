@@ -1,6 +1,6 @@
 import os
 import requests
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 from auth import get_auth_header_claims
@@ -63,6 +63,19 @@ def home():
         "model": MODEL_NAME,
         "provider": "custom:bedrock_mantle"
     }), 200
+
+
+@app.route("/app", methods=["GET"])
+def app_page():
+    # Serves the auth-enabled frontend (Phase 3-A: Google Sign-In)
+    # from the registered HTTPS origin so Google Identity Services
+    # (Sign-In button iframe + popup) works. Additive only: existing
+    # GET / JSON identity endpoint is untouched.
+    return send_from_directory(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend"),
+        "index.html",
+        mimetype="text/html",
+    )
 
 @app.route("/health", methods=["GET"])
 def health():
