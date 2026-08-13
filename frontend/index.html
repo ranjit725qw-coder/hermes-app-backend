@@ -2676,7 +2676,41 @@ a:hover { text-decoration: underline; }
      exactly once (it refuses a second init — 'already initialized' error). The gate
      button simply rides on that same initialized client via renderButton only, and
      authOnCredential (the module's callback) persists the session + calls
-     authUpdateUI(), which the gate wraps to hide itself on success. */
+     authUpdateUI(), which the gate wraps to hide itself on success.
+
+     Loading states: while the SDK is loading, a spinner + 'Connecting…' text is
+     shown (NOT an error). The red error appears only after the final retry truly
+     fails, together with a Retry button to re-attempt the whole flow. */
+  var MAX_ATTEMPTS = 12;                 // total render attempts (covers slow mobile networks: ~20s)
+  var LOADING_TEXT = 'Connecting to sign-in service\u2026';
+  var FINAL_ERROR_TEXT = 'Sign-in service could not load. Try again.';
+
+  /* ---- loading spinner (pure CSS, injected) ---- */
+  var spinnerStyle = document.createElement('style');
+  spinnerStyle.textContent =
+    '#gateSpinner{display:none;margin:0 0 6px;width:22px;height:22px;border:3px solid rgba(255,255,255,.15);border-top-color:#7c5cff;border-radius:50%;animation:gateSpin .9s linear infinite}' +
+    '@keyframes gateSpin{to{transform:rotate(360deg)}}' +
+    '#gateRetryBtn{display:none;margin:8px auto 0;padding:8px 22px;border:1px solid rgba(255,255,255,.25);border-radius:8px;background:transparent;color:#fff;font-size:13px;cursor:pointer}' +
+    '#gateRetryBtn:hover{background:rgba(255,255,255,.08)}';
+  document.head.appendChild(spinnerStyle);
+  var spinner = document.createElement('div');
+  spinner.id = 'gateSpinner';
+  gateBtn.parentNode.insertBefore(spinner, gateBtn);
+  var retryBtn = document.createElement('button');
+  retryBtn.id = 'gateRetryBtn';
+  retryBtn.type = 'button';
+  retryBtn.textContent = 'Retry';
+  gateBtn.parentNode.appendChild(retryBtn);
+
+  function setGateState(kind) {
+    // kind: 'loading' | 'button' | 'error'
+    spinner.style.display = (kind === 'loading') ? 'block' : 'none';
+    gateErr.textContent = (kind === 'loading') ? LOADING_TEXT : (kind === 'error') ? FINAL_ERROR_TEXT : '';
+    gateErr.style.color = (kind === 'error') ? '' : 'var(--muted,#9ca3af)';
+    gateBtn.style.display = (kind === 'button') ? '' : 'none';
+    retryBtn.style.display = (kind === 'error') ? 'block' : 'none';
+  }
+
   function isGsiApiReady() {
     if (typeof window.google === 'undefined' || !window.google.accounts) { return false; }
     var id = window.google.accounts.id;
@@ -2688,9 +2722,12 @@ a:hover { text-decoration: underline; }
   function tryRenderGateButton(attempt) {
     if (attempt === undefined) { attempt = 0; }
     if (!isGsiApiReady()) {
-      gateErr.textContent = 'Sign-in service could not load.';
-      if (attempt < 6) {
+      setGateState('loading');
+      if (attempt < MAX_ATTEMPTS) {
         setTimeout(function () { tryRenderGateButton(attempt + 1); }, 1500);
+      } else {
+        console.warn('[gate] GSI API never became ready after ' + MAX_ATTEMPTS + ' attempts');
+        setGateState('error');
       }
       return;
     }
@@ -2700,26 +2737,42 @@ a:hover { text-decoration: underline; }
         shape: 'rectangular', logo_alignment: 'left'
       });
     } catch (e) {
-      gateErr.textContent = 'Sign-in unavailable on this device.';
+      console.warn('[gate] renderButton threw:', e);
+      setGateState('error');
       return;
     }
     // GSI may report 'ready' while its internal state is still initializing
     // ('intermediate'), in which case renderButton inserts nothing. Re-check
-    // after a delay and retry once.
+    // after a delay and retry.
     setTimeout(function () {
       if (gateButtonRendered()) {
-        gateErr.textContent = '';
+        setGateState('button');
+        console.log('[gate] Sign-in button rendered');
         return;
       }
-      if (attempt < 6) {
+      if (attempt < MAX_ATTEMPTS) {
         tryRenderGateButton(attempt + 1);
       } else {
-        gateErr.textContent = 'Sign-in service could not load.';
+        console.warn('[gate] button not rendered after ' + MAX_ATTEMPTS + ' attempts');
+        setGateState('error');
       }
     }, 1500);
   }
-  // Initial wait lets the SDK script finish loading before the first render.
-  setTimeout(function () { tryRenderGateButton(); }, 2500);
+  retryBtn.addEventListener('click', function () {
+    retryBtn.style.display = 'none';
+    gateBtn.innerHTML = '';
+    tryRenderGateButton();
+  });
+
+  /* Trigger the first render attempt as soon as the SDK script fires onload,
+     otherwise fall back to a short delay. Either path shows the loading state
+     immediately so the user never sees an error while the SDK is still loading. */
+  var gsiScript = document.querySelector('script[src*="accounts.google.com/gsi/client"]');
+  if (gsiScript) {
+    gsiScript.addEventListener('load', function () { tryRenderGateButton(); });
+    if (isGsiApiReady()) { tryRenderGateButton(); } // already cached
+  }
+  setTimeout(function () { tryRenderGateButton(); }, 1000);
 
   /* Sign-out: the Settings panel's existing Sign out (authSignOut) already calls
      authClear(). Add a logout button in the gate card too so a signed-in user who
