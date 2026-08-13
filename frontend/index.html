@@ -1277,6 +1277,21 @@ a:hover { text-decoration: underline; }
 
   <!-- Phase 3-A: Google Sign-In (Google Identity Services) -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+/* ---------- LOGIN-FIRST GATE ---------- */
+.login-gate{position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;background:var(--bg,var(--app-bg,#0d1117));overflow-y:auto}
+.login-gate__card{width:100%;max-width:380px;display:flex;flex-direction:column;align-items:center;text-align:center;background:var(--panel,var(--card-bg,#161b22));border:1px solid var(--border,var(--border-color,#30363d));border-radius:16px;padding:36px 28px 28px}
+.login-gate__logo{width:64px;height:64px;color:var(--brand,var(--accent,#7c5cff))}
+.login-gate__title{margin:16px 0 4px;font-size:22px;font-weight:700;color:var(--text)}
+.login-gate__tagline{margin:0 0 20px;font-size:14px;opacity:.7;color:var(--text)}
+.login-gate__prompt{margin:0 0 18px;font-size:13px;line-height:1.5;opacity:.85;color:var(--text)}
+.login-gate__btn{min-height:44px;width:100%}
+.login-gate__err{margin:10px 0 0;font-size:12px;color:var(--error,var(--danger,#f47067));min-height:16px}
+.login-gate__foot{margin-top:18px;font-size:11px;opacity:.5;color:var(--text)}
+.app--gated{display:none !important}
+</style>
+
+</style>
 </head>
 <body>
 
@@ -1313,6 +1328,27 @@ a:hover { text-decoration: underline; }
 <div class="offline-banner" id="offlineBanner"></div>
 
 <!-- ============ MAIN APP ============ -->
+<!-- ============ LOGIN-FIRST GATE ============ -->
+<div class="login-gate" id="loginGate" aria-hidden="false">
+  <div class="login-gate__card">
+    <svg class="login-gate__logo" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <defs>
+        <linearGradient id="gateGrad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#7c5cff"/>
+          <stop offset="100%" stop-color="#4a90d9"/>
+        </linearGradient>
+      </defs>
+      <circle cx="50" cy="50" r="44" fill="none" stroke="url(#gateGrad)" stroke-width="6"/>
+      <path d="M34 66 V46 l16 20 16-20 v20" fill="none" stroke="url(#gateGrad)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <h1 class="login-gate__title">Hermes AI</h1>
+    <p class="login-gate__tagline">Your Intelligent AI Assistant</p>
+    <p class="login-gate__prompt">Sign in with your Google account to continue.</p>
+    <div class="login-gate__btn" id="gateGsiButton"></div>
+    <p class="login-gate__err" id="gateError"></p>
+    <p class="login-gate__foot">Only authorized users can access this app.</p>
+  </div>
+</div>
 <div class="app" id="app">
 
   <!-- TOP BAR -->
@@ -1432,7 +1468,7 @@ a:hover { text-decoration: underline; }
       </div>
       <div class="about-item">
         <span class="about-label">Version</span>
-        <span class="about-value">1.0.0</span>
+        <span class="about-value">1.0.3</span>
       </div>
       <div class="about-item">
         <span class="about-label">Backend</span>
@@ -2583,5 +2619,122 @@ a:hover { text-decoration: underline; }
   })();
   </script>
   <!-- /Phase 3-A auth module -->
+<script>
+/* ---------- LOGIN-FIRST GATE LOGIC ----------
+   Flow: app launch -> gate visible until a persisted, valid Supabase session
+   exists (token + user in localStorage, verified server-side once). After a
+   successful Google sign-in (credential -> backend exchange), the gate hides
+   and the dashboard shows. Logout re-enables the gate on the next launch.
+*/
+(function hermesLoginGate() {
+  var gate = document.getElementById('loginGate');
+  var appEl = document.getElementById('app');
+  var gateBtn = document.getElementById('gateGsiButton');
+  var gateErr = document.getElementById('gateError');
+  if (!gate || !appEl || !gateBtn) return;
+
+  function showApp() {
+    gate.style.display = 'none';
+    appEl.classList.remove('app--gated');
+  }
+  function showGate() {
+    appEl.classList.add('app--gated');
+    gate.style.display = 'flex';
+  }
+
+  /* Verify a persisted session server-side once; on failure wipe and gate. */
+  function verifyPersisted() {
+    var tok = (window.authGetToken && window.authGetToken()) || null;
+    var user = (window.authGetUser && window.authGetUser()) || null;
+    if (!tok || !user) { showGate(); return; }
+    var apiBase = (window.hermesConfig && window.hermesConfig.apiBase) || '';
+    if (!apiBase) {
+      var m = document.querySelector('script[src*="app.js"], script');
+      // fall back to live production origin (asset frontend always targets it)
+      apiBase = 'https://hermes-app-backend-7cso.onrender.com';
+    }
+    fetch(apiBase + '/auth/verify', { headers: { 'Authorization': 'Bearer ' + tok } })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data && data.auth_mode === 'authenticated') { showApp(); }
+        else { window.authClear && window.authClear(); showGate(); }
+      })
+      .catch(function () { window.authClear && window.authClear(); showGate(); });
+  }
+
+  /* Hook the existing auth success path: after authUpdateUI succeeds with a
+     real session, hide the gate. */
+  var origUpdate = window.authUpdateUI;
+  window.authUpdateUI = function authUpdateUI() {
+    if (typeof origUpdate === 'function') origUpdate();
+    var tok = window.authGetToken && window.authGetToken();
+    var user = window.authGetUser && window.authGetUser();
+    if (tok && user) showApp(); else showGate();
+  };
+
+  /* The existing Phase 3-A auth module already calls google.accounts.id.initialize
+     exactly once (it refuses a second init — 'already initialized' error). The gate
+     button simply rides on that same initialized client via renderButton only, and
+     authOnCredential (the module's callback) persists the session + calls
+     authUpdateUI(), which the gate wraps to hide itself on success. */
+  function isGsiApiReady() {
+    if (typeof window.google === 'undefined' || !window.google.accounts) { return false; }
+    var id = window.google.accounts.id;
+    return id && typeof id.renderButton === 'function';
+  }
+  function gateButtonRendered() {
+    return gateBtn.children.length > 0;
+  }
+  function tryRenderGateButton(attempt) {
+    if (attempt === undefined) { attempt = 0; }
+    if (!isGsiApiReady()) {
+      gateErr.textContent = 'Sign-in service could not load.';
+      if (attempt < 6) {
+        setTimeout(function () { tryRenderGateButton(attempt + 1); }, 1500);
+      }
+      return;
+    }
+    try {
+      window.google.accounts.id.renderButton(gateBtn, {
+        theme: 'filled_black', size: 'large', width: 268, text: 'signin_with',
+        shape: 'rectangular', logo_alignment: 'left'
+      });
+    } catch (e) {
+      gateErr.textContent = 'Sign-in unavailable on this device.';
+      return;
+    }
+    // GSI may report 'ready' while its internal state is still initializing
+    // ('intermediate'), in which case renderButton inserts nothing. Re-check
+    // after a delay and retry once.
+    setTimeout(function () {
+      if (gateButtonRendered()) {
+        gateErr.textContent = '';
+        return;
+      }
+      if (attempt < 6) {
+        tryRenderGateButton(attempt + 1);
+      } else {
+        gateErr.textContent = 'Sign-in service could not load.';
+      }
+    }, 1500);
+  }
+  // Initial wait lets the SDK script finish loading before the first render.
+  setTimeout(function () { tryRenderGateButton(); }, 2500);
+
+  /* Sign-out: the Settings panel's existing Sign out (authSignOut) already calls
+     authClear(). Add a logout button in the gate card too so a signed-in user who
+     returns to the gate can fully reset, and make sure logout re-gates immediately. */
+  var origSignOut = window.authSignOut;
+  window.authSignOut = function authSignOut() {
+    if (typeof origSignOut === 'function') { origSignOut(); }
+    showGate();
+    if (typeof window.google !== 'undefined' && window.google.accounts) {
+      try { window.google.accounts.id.disableAutoSelect(); } catch (e) {}
+    }
+  };
+
+  verifyPersisted();
+})();
+</script>
 </body>
 </html>
