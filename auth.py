@@ -18,6 +18,8 @@ from functools import lru_cache
 import jwt  # PyJWT
 import requests
 
+from auth_google import verify_google_token
+
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://bjoljeysryycwflhcnha.supabase.co")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY") or ""
 
@@ -132,6 +134,13 @@ def get_auth_header_claims(request):
     """
     Extract and validate the optional Bearer token from a Flask request.
 
+    Tries Supabase validation first (access tokens from the Supabase token
+    exchange). If the token is clearly a Supabase-format token (has a `kid`
+    and a `role` claim) but invalid, it fails immediately. Otherwise, as a
+    fallback for Option B (native Credential Manager Google sign-in), it
+    validates the token as a Google-signed ID token against Google's public
+    JWKS.
+
     Returns (claims_dict, None) when a valid token is present,
     (None, None) when no token is given (anonymous), or
     (None, error_message) when the token is present but invalid.
@@ -139,7 +148,19 @@ def get_auth_header_claims(request):
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
         return None, None
-    token = header[len("Bearer "):].strip()
+    token = header[len("Bearer ") :].strip()
     if not token:
         return None, None
-    return verify_supabase_token(token)
+    claims, err = verify_supabase_token(token)
+    if claims is not None:
+        return claims, None
+    # Only fall back to Google validation when the token is not a Supabase
+    # token at all (no key id and no role claim). A Supabase token that
+    # failed validation is rejected outright.
+    try:
+        payload = jwt.get_unverified_claims(token)
+    except Exception:
+        payload = {}
+    if payload.get("kid") or payload.get("role") is not None:
+        return None, err or "Invalid token"
+    return verify_google_token(token)

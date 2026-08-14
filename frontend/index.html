@@ -1286,6 +1286,11 @@ a:hover { text-decoration: underline; }
 .login-gate__tagline{margin:0 0 20px;font-size:14px;opacity:.7;color:var(--text)}
 .login-gate__prompt{margin:0 0 18px;font-size:13px;line-height:1.5;opacity:.85;color:var(--text)}
 .login-gate__btn{min-height:44px;width:100%}
+/* Native-first builds skip the GSI iframe — style the button ourselves so
+   the tap target is visible (gradient, white text, hover/active states). */
+.login-gate__btn--native{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;min-height:44px;padding:12px 24px;background:linear-gradient(135deg,#7c5cff,#4a90d9);color:#fff;font-size:15px;font-weight:600;border:0;border-radius:10px;cursor:pointer;box-shadow:0 2px 10px rgba(124,92,255,.35);transition:transform .15s ease,box-shadow .15s ease}
+.login-gate__btn--native:hover{box-shadow:0 4px 16px rgba(124,92,255,.5)}
+.login-gate__btn--native:active{transform:scale(.97)}
 .login-gate__err{margin:10px 0 0;font-size:12px;color:var(--error,var(--danger,#f47067));min-height:16px}
 .login-gate__foot{margin-top:18px;font-size:11px;opacity:.5;color:var(--text)}
 .app--gated{display:none !important}
@@ -2672,6 +2677,90 @@ a:hover { text-decoration: underline; }
     if (tok && user) showApp(); else showGate();
   };
 
+  /* Phase 3-A Option B: Native Credential Manager bridge (Android).
+     On Android (WebView app with the injected `AndroidNative` interface),
+     the gate button triggers the NATIVE account chooser first — this is the
+     only path that surfaces the device's existing Google accounts. If the
+     native bridge is unavailable (desktop browser, or the APK predates this
+     change), the existing web GSI button renders and behaves exactly as
+     before. A native cancel/failure simply leaves the gate visible so the
+     user can retry or fall back to the web Sign-In flow. */
+  /* Device test fix (1.0.5): on Android the tap MUST go straight to the
+     native Credential Manager chooser. The previous iframe-exclusion rule
+     let taps land on the GSI visual button instead (which is itself an
+     iframe), so the native chooser was never invoked on real devices.
+     Diagnostic events are logged so device-side invoke can be confirmed. */
+  var isNativeAvailable = typeof window.AndroidNative === 'object' &&
+    typeof window.AndroidNative.signIn === 'function';
+  var gateDiag = document.createElement('p');
+  gateDiag.id = 'gateDiagStatus';
+  gateDiag.className = 'login-gate__diag';
+  gateDiag.textContent = 'Native sign-in: ' +
+    (isNativeAvailable ? 'available' : 'unavailable (web flow)');
+  gateDiag.style.cssText = 'display:block;margin:4px auto 0;font-size:11px;color:#8ab4f8;text-align:center;letter-spacing:.02em;max-width:100%;white-space:pre-wrap';
+  gateBtn.parentNode.insertBefore(gateDiag, gateBtn.nextSibling);
+
+  /* Device-test diagnostic link (1.0.6): pulls the device-side execution
+     trace from the Android app via the HermesDiag bridge and shows it under
+     the button so the user can copy it without logcat access. */
+  var gateDiagLink = document.createElement('button');
+  gateDiagLink.type = 'button';
+  gateDiagLink.textContent = 'Show device diagnostic log';
+  gateDiagLink.style.cssText = 'display:none;margin:10px auto 0;padding:6px 12px;font-size:11px;color:#8ab4f8;background:transparent;border:1px solid #30363d;border-radius:6px;cursor:pointer';
+  gateBtn.parentNode.insertBefore(gateDiagLink, gateDiag.nextSibling);
+  if (isNativeAvailable) {
+    gateDiagLink.style.display = 'inline-block';
+    gateDiagLink.addEventListener('click', function () {
+      try {
+        var log = window.HermesDiag && typeof window.HermesDiag.lastDiagnostic === 'function'
+          ? window.HermesDiag.lastDiagnostic()
+          : '(diagnostic bridge missing in this APK version)';
+        gateDiag.textContent = log;
+      } catch (err) {
+        gateDiag.textContent = 'diagnostic read failed: ' + err;
+      }
+    });
+  }
+  function gateDiagLog(msg) {
+    if (!gateDiag.textContent || !gateDiag.textContent.startsWith('HERMES DIAGNOSTIC')) {
+      gateDiag.textContent = 'Native: ' + msg;
+    }
+    console.log('[gate-diag] ' + msg);
+  }
+  gateDiagLog(isNativeAvailable ? 'available — tap to open account chooser' : 'unavailable — using web flow');
+
+  function gateHandleClick(ev) {
+    if (!isNativeAvailable) { return; }
+    // Direct native path — NO iframe exclusion. Any tap on the gate button
+    // area opens the device account chooser (GSI visual is not rendered on
+    // native-capable builds, so nothing else can intercept the tap).
+    gateDiagLog('sign-in requested');
+    try { window.AndroidNative.signIn(); } catch (e) {
+      gateDiagLog('native signIn threw — use web flow');
+      console.warn('[gate] native signIn threw, web GSI fallback stays available');
+    }
+  }
+  gateBtn.addEventListener('click', gateHandleClick);
+
+  /* Native success callback path: the Android app passes back the signed
+     Google ID token via `authOnCredential('<idToken>')`. The existing auth
+     module then exchanges it with Supabase, persists the session and the
+     gate-wrapped authUpdateUI() hides the gate. A raw JS bridge call
+     argument could be malformed — guard accordingly. */
+  window.hermesNativeSignInSucceeded = function hermesNativeSignInSucceeded(token) {
+    if (typeof token === 'string' && token.length > 50 && authOnCredential) {
+      authOnCredential(token);
+    }
+  };
+
+  /* Native failure/cancel notification: the Android app may call this when
+     the chooser is dismissed without a credential. Keep the gate visible —
+     the user can tap again (native chooser re-opens) or use the web GSI
+     fallback path when available. */
+  window.hermesNativeSignInFailed = function hermesNativeSignInFailed() {
+    if (isNativeAvailable) { gateDiagLog('canceled — tap to retry'); }
+  };
+
   /* The existing Phase 3-A auth module already calls google.accounts.id.initialize
      exactly once (it refuses a second init — 'already initialized' error). The gate
      button simply rides on that same initialized client via renderButton only, and
@@ -2719,8 +2808,31 @@ a:hover { text-decoration: underline; }
   function gateButtonRendered() {
     return gateBtn.children.length > 0;
   }
+  /* Native-first builds do NOT render the GSI visual button: it is the
+     source of the intercepted-tap bug (1.0.4) and it shows no device
+     accounts in a WebView. The web GSI flow is preserved as fallback for
+     native-unavailable environments (desktop browsers) only. */
   function tryRenderGateButton(attempt) {
     if (attempt === undefined) { attempt = 0; }
+    if (isNativeAvailable) {
+      // Native path owns the gate — show our own styled button (the GSI
+      // iframe is deliberately NOT rendered on native builds: it was the
+      // source of the intercepted-tap bug and shows no device accounts).
+      if (attempt === 0 && !gateBtn.classList.contains('login-gate__btn--native')) {
+        gateBtn.classList.add('login-gate__btn--native');
+        gateBtn.textContent = '';
+        gateBtn.innerHTML =
+          '<svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">' +
+          '<path fill="#FFC107" d="M43.6 20.1H42V20H24v8h11.3C33.9 32.6 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.6-.4-3.9z"/>' +
+          '<path fill="#FF3D00" d="M6.3 14.1l6.6 4.8C14.7 15.4 19 12 24 12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.1z"/>' +
+          '<path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35 26.7 36 24 36c-5.3 0-9.8-3.4-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/>' +
+          '<path fill="#1976D2" d="M43.6 20.1H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C41.8 34.6 44 29.7 44 24c0-1.3-.1-2.6-.4-3.9z"/>' +
+          '</svg>Sign in with Google';
+        console.log('[gate] native available; styled native button rendered, GSI iframe skipped');
+      }
+      setGateState('button');
+      return;
+    }
     if (!isGsiApiReady()) {
       setGateState('loading');
       if (attempt < MAX_ATTEMPTS) {
@@ -2761,6 +2873,7 @@ a:hover { text-decoration: underline; }
   retryBtn.addEventListener('click', function () {
     retryBtn.style.display = 'none';
     gateBtn.innerHTML = '';
+    gateBtn.classList.remove('login-gate__btn--native');
     tryRenderGateButton();
   });
 
