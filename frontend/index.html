@@ -2551,6 +2551,8 @@ a:hover { text-decoration: underline; }
     var AUTH_KEY = 'hermes_auth_token';
     var AUTH_USER_KEY = 'hermes_auth_user';
     var SUPABASE_URL = 'https://bjoljeysryycwflhcnha.supabase.co';
+    var RUNTIME_CONFIG = __HERMES_RUNTIME_CONFIG__;
+    var SUPABASE_ANON_KEY = RUNTIME_CONFIG.supabaseAnonKey || '';
     var CLIENT_ID = '131546003267-6njnutgr106kcba8m8cg2u9lco55u448.apps.googleusercontent.com';
 
     window.authGetToken = function authGetToken() { return localStorage.getItem(AUTH_KEY); }
@@ -2575,14 +2577,36 @@ a:hover { text-decoration: underline; }
       authClear();
       authUpdateUI();
     }
+    function showExchangeError(status, data) {
+      var gateError = document.getElementById('gateError');
+      if (!gateError) { return; }
+      var detail = 'Could not complete Google sign-in.';
+      if (data && typeof data === 'object') {
+        var candidate = data.error_description || data.msg || data.error;
+        if (typeof candidate === 'string' && candidate) {
+          detail = candidate.slice(0, 160);
+        }
+      }
+      gateError.textContent = 'Exchange failed (HTTP ' + status + '): ' + detail;
+    }
     window.authOnCredential = function authOnCredential(credential) {
       if (!credential) { authClear(); return; }
       fetch(SUPABASE_URL + '/auth/v1/token?grant_type=id_token', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_ANON_KEY
+        },
         body: JSON.stringify({ id_token: credential, provider: 'google' })
-      }).then(function(r) { return r.json(); }).then(function(data) {
-        if (data.access_token) {
+      }).then(function(r) {
+        return r.text().then(function(text) {
+          var data = {};
+          try { data = text ? JSON.parse(text) : {}; } catch (e) { data = {}; }
+          return { status: r.status, data: data };
+        });
+      }).then(function(result) {
+        var data = result.data;
+        if (data && data.access_token) {
           localStorage.setItem(AUTH_KEY, data.access_token);
           var u = data.user || {};
           localStorage.setItem(AUTH_USER_KEY, JSON.stringify({
@@ -2593,10 +2617,12 @@ a:hover { text-decoration: underline; }
         } else {
           authClear();
           console.warn('[auth] Supabase token exchange failed:', data.error || data.msg || 'unknown');
+          showExchangeError(result.status, data);
         }
       }).catch(function(e) {
         authClear();
         console.warn('[auth] token exchange error:', e);
+        showExchangeError(0, null);
       });
     }
     window.authInitGoogle = function authInitGoogle() {

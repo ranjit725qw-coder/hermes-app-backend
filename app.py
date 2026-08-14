@@ -1,6 +1,7 @@
+import json
 import os
 import requests
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 
 from auth import get_auth_header_claims
@@ -71,9 +72,15 @@ def app_page():
     # from the registered HTTPS origin so Google Identity Services
     # (Sign-In button iframe + popup) works. Additive only: existing
     # GET / JSON identity endpoint is untouched.
-    return send_from_directory(
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend"),
-        "index.html",
+    frontend_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "frontend", "index.html"
+    )
+    with open(frontend_path, "r", encoding="utf-8") as frontend_file:
+        html = frontend_file.read()
+    runtime_config = json.dumps({"supabaseAnonKey": SUPABASE_ANON_KEY or ""})
+    runtime_config = runtime_config.replace("</", "<\\/")
+    return Response(
+        html.replace("__HERMES_RUNTIME_CONFIG__", runtime_config),
         mimetype="text/html",
     )
 
