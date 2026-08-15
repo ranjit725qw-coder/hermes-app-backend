@@ -22,6 +22,8 @@ from auth_google import verify_google_token
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://bjoljeysryycwflhcnha.supabase.co")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY") or ""
+SUPABASE_ISSUER = f"{SUPABASE_URL.rstrip('/')}/auth/v1"
+SUPABASE_AUTHENTICATED_AUDIENCE = "authenticated"
 
 _jwks_cache = {"keys": None, "fetched_at": 0.0}
 _cache_lock = threading.Lock()
@@ -111,12 +113,16 @@ def verify_supabase_token(token):
             token,
             public_key,
             algorithms=algorithms,
+            audience=SUPABASE_AUTHENTICATED_AUDIENCE,
+            issuer=SUPABASE_ISSUER,
             options={"verify_exp": True},
         )
     except jwt.exceptions.ExpiredSignatureError:
         return None, "Token expired"
     except jwt.exceptions.InvalidAudienceError:
         return None, "Invalid audience"
+    except jwt.exceptions.InvalidIssuerError:
+        return None, "Invalid issuer"
     except jwt.exceptions.InvalidSignatureError:
         return None, "Invalid signature"
     except jwt.exceptions.DecodeError as exc:
@@ -154,13 +160,22 @@ def get_auth_header_claims(request):
     claims, err = verify_supabase_token(token)
     if claims is not None:
         return claims, None
-    # Only fall back to Google validation when the token is not a Supabase
-    # token at all (no key id and no role claim). A Supabase token that
-    # failed validation is rejected outright.
+    # Only fall back to Google validation when the token does not claim an
+    # authenticated Supabase role. This unverified decode is classification
+    # only; authorization still requires the signature, audience, issuer, and
+    # expiry checks in verify_supabase_token above.
     try:
-        payload = jwt.get_unverified_claims(token)
+        payload = jwt.decode(
+            token,
+            options={
+                "verify_signature": False,
+                "verify_exp": False,
+                "verify_aud": False,
+                "verify_iss": False,
+            },
+        )
     except Exception:
         payload = {}
-    if payload.get("kid") or payload.get("role") is not None:
+    if payload.get("role") == SUPABASE_AUTHENTICATED_AUDIENCE:
         return None, err or "Invalid token"
     return verify_google_token(token)
