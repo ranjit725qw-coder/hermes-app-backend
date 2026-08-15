@@ -348,6 +348,74 @@ a:hover { text-decoration: underline; }
   height: 22px;
 }
 
+.topbar-action {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  margin-left: 6px;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--bg-secondary);
+  transition: transform var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
+}
+
+.topbar-action--primary {
+  color: #fff;
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.topbar-action:hover { color: var(--text-primary); background: var(--bg-tertiary); }
+.topbar-action--primary:hover { color: #fff; background: var(--accent-hover); }
+.topbar-action:active { transform: scale(0.97); }
+
+.history-overlay {
+  position: fixed;
+  inset: 0;
+  opacity: 0;
+  visibility: hidden;
+  background: rgba(0, 0, 0, 0.48);
+  transition: opacity var(--transition-fast), visibility var(--transition-fast);
+  z-index: 39;
+}
+
+.history-overlay.open { opacity: 1; visibility: visible; }
+
+.history-drawer {
+  position: fixed;
+  z-index: 40;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(360px, 88vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+  border-right: 1px solid var(--border);
+  box-shadow: 14px 0 42px rgba(0, 0, 0, 0.24);
+  transform: translateX(-105%);
+  transition: transform var(--transition-normal);
+}
+
+.history-drawer.open { transform: translateX(0); }
+.history-header { display: flex; align-items: flex-start; justify-content: space-between; padding: 22px 18px 14px; border-bottom: 1px solid var(--border); }
+.history-title { color: var(--text-primary); font-size: 18px; font-weight: 700; }
+.history-subtitle { color: var(--text-muted); font-size: 12px; margin-top: 3px; }
+.history-body { flex: 1; overflow-y: auto; padding: 10px; }
+.history-item { width: 100%; text-align: left; display: block; padding: 12px; margin-bottom: 6px; border-radius: var(--radius-md); color: var(--text-primary); background: transparent; }
+.history-item:hover, .history-item.active { background: var(--bg-tertiary); }
+.history-item strong, .history-item span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-item strong { font-size: 14px; }
+.history-item span { color: var(--text-muted); font-size: 11px; margin-top: 4px; }
+.history-empty { color: var(--text-muted); font-size: 14px; line-height: 1.5; padding: 18px 10px; }
+
+@media (max-width: 480px) {
+  .topbar-action { padding: 7px 8px; margin-left: 4px; font-size: 12px; }
+  .topbar-badge { display: none; }
+}
+
 /* ---------- CHAT CONTAINER ---------- */
 .chat-container {
   flex: 1;
@@ -1378,6 +1446,8 @@ a:hover { text-decoration: underline; }
         <span class="topbar-badge">Pro</span>
       </div>
     </div>
+    <button class="topbar-action" id="historyBtn" type="button">History</button>
+    <button class="topbar-action topbar-action--primary" id="newChatBtn" type="button">New Chat</button>
     <button class="icon-btn" id="settingsBtn" aria-label="Settings">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="3"/>
@@ -1495,6 +1565,19 @@ a:hover { text-decoration: underline; }
   </div>
 </aside>
 
+<!-- ============ CONVERSATION HISTORY DRAWER ============ -->
+<div class="history-overlay" id="historyOverlay"></div>
+<aside class="history-drawer" id="historyDrawer" aria-label="Conversation history">
+  <header class="history-header">
+    <div>
+      <div class="history-title">Chat History</div>
+      <div class="history-subtitle">Your saved conversations</div>
+    </div>
+    <button class="icon-btn" id="closeHistoryBtn" aria-label="Close history">×</button>
+  </header>
+  <div class="history-body" id="historyList" aria-live="polite"></div>
+</aside>
+
 <!-- ============ TOAST CONTAINER ============ -->
 <div class="toast-container" id="toastContainer"></div>
 
@@ -1572,6 +1655,8 @@ a:hover { text-decoration: underline; }
     },
     lastUserMessage: null,
     userHasScrolledUp: false,
+    conversations: [],
+    activeConversationId: null,
   };
 
   // ---------- DOM REFERENCES ----------
@@ -1596,9 +1681,15 @@ a:hover { text-decoration: underline; }
     newMessageIndicator: $('#newMessageIndicator'),
     offlineBanner: $('#offlineBanner'),
     userIdDisplay: $('#userIdDisplay'),
-      authStatusEl: $('#hermesAuthStatus'),
+    authStatusEl: $('#hermesAuthStatus'),
     statusDot: $('#statusDot'),
     statusText: $('#statusText'),
+    historyBtn: $('#historyBtn'),
+    newChatBtn: $('#newChatBtn'),
+    historyDrawer: $('#historyDrawer'),
+    historyOverlay: $('#historyOverlay'),
+    closeHistoryBtn: $('#closeHistoryBtn'),
+    historyList: $('#historyList'),
   };
 
   // ---------- INITIALIZATION ----------
@@ -1689,6 +1780,10 @@ a:hover { text-decoration: underline; }
     elements.settingsBtn.addEventListener('click', openSettings);
     elements.closeSettingsBtn.addEventListener('click', closeSettings);
     elements.settingsOverlay.addEventListener('click', closeSettings);
+    elements.historyBtn.addEventListener('click', openHistory);
+    elements.newChatBtn.addEventListener('click', createNewConversation);
+    elements.closeHistoryBtn.addEventListener('click', closeHistory);
+    elements.historyOverlay.addEventListener('click', closeHistory);
 
     // Theme
     $$('#themeSelector .theme-option').forEach(btn => {
@@ -1739,6 +1834,7 @@ a:hover { text-decoration: underline; }
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         closeSettings();
+        closeHistory();
       }
     });
   }
@@ -1794,6 +1890,118 @@ a:hover { text-decoration: underline; }
     elements.settingsDrawer.classList.remove('open');
     elements.settingsOverlay.classList.remove('open');
     document.body.style.overflow = '';
+  }
+
+  // ---------- CONVERSATION HISTORY ----------
+  function getApiBase() {
+    return CONFIG.API_URL.replace(/\/chat$/, '');
+  }
+
+  function hasAuthenticatedSession() {
+    return Boolean(window.authGetToken && window.authGetToken());
+  }
+
+  async function historyFetch(path, options = {}) {
+    const headers = { ...(options.headers || {}) };
+    if (window.hermesSendAuthHeaders) window.hermesSendAuthHeaders(headers);
+    const response = await fetch(getApiBase() + path, { ...options, headers });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'Conversation history is unavailable.');
+    return data;
+  }
+
+  function openHistory() {
+    if (!hasAuthenticatedSession()) {
+      showToast('Sign in to view saved conversations.', 'info');
+      return;
+    }
+    elements.historyDrawer.classList.add('open');
+    elements.historyOverlay.classList.add('open');
+    document.body.style.overflow = 'hidden';
+    loadConversations();
+  }
+
+  function closeHistory() {
+    elements.historyDrawer.classList.remove('open');
+    elements.historyOverlay.classList.remove('open');
+    document.body.style.overflow = '';
+  }
+
+  function formatConversationTime(value) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? '' : date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+  }
+
+  function renderConversationList() {
+    if (!state.conversations.length) {
+      elements.historyList.innerHTML = '<p class="history-empty">No saved conversations yet. Start a New Chat to keep your messages here.</p>';
+      return;
+    }
+    elements.historyList.innerHTML = '';
+    state.conversations.forEach((conversation) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'history-item' + (conversation.id === state.activeConversationId ? ' active' : '');
+      item.innerHTML = '<strong></strong><span></span>';
+      item.querySelector('strong').textContent = conversation.title || 'New conversation';
+      item.querySelector('span').textContent = formatConversationTime(conversation.updated_at || conversation.created_at);
+      item.addEventListener('click', () => loadConversation(conversation.id));
+      elements.historyList.appendChild(item);
+    });
+  }
+
+  async function loadConversations() {
+    elements.historyList.innerHTML = '<p class="history-empty">Loading saved conversations…</p>';
+    try {
+      const data = await historyFetch('/conversations');
+      state.conversations = Array.isArray(data.conversations) ? data.conversations : [];
+      renderConversationList();
+    } catch (error) {
+      elements.historyList.innerHTML = '<p class="history-empty">Conversation history is unavailable right now.</p>';
+    }
+  }
+
+  async function createNewConversation() {
+    if (!hasAuthenticatedSession()) {
+      showToast('Sign in to create a saved conversation.', 'info');
+      return false;
+    }
+    try {
+      const data = await historyFetch('/conversations', { method: 'POST' });
+      const conversation = data.conversation;
+      state.activeConversationId = conversation.id;
+      state.messages = [];
+      state.lastUserMessage = null;
+      renderInitialView();
+      closeHistory();
+      await loadConversations();
+      showToast('New chat started.', 'success');
+      elements.composerInput.focus();
+      return true;
+    } catch (error) {
+      showToast('Could not create a new chat. Please try again.', 'error');
+      return false;
+    }
+  }
+
+  async function loadConversation(conversationId) {
+    try {
+      const data = await historyFetch('/conversations/' + encodeURIComponent(conversationId) + '/messages');
+      state.activeConversationId = data.conversation.id;
+      state.messages = (data.messages || []).map((message) => ({
+        id: message.id,
+        role: message.role === 'assistant' ? 'ai' : message.role,
+        content: message.content,
+        timestamp: Date.parse(message.created_at) || Date.now(),
+      })).filter((message) => message.role === 'user' || message.role === 'ai');
+      state.lastUserMessage = [...state.messages].reverse().find((message) => message.role === 'user') || null;
+      renderInitialView();
+      closeHistory();
+      if (state.settings.autoScroll) scrollToBottom(true);
+      await loadConversations();
+    } catch (error) {
+      showToast('Could not open this conversation. Please try again.', 'error');
+    }
   }
 
   // ---------- RENDERING ----------
@@ -2300,6 +2508,11 @@ a:hover { text-decoration: underline; }
     const text = elements.composerInput.value.trim();
     if (!text || state.isSending) return;
 
+    if (hasAuthenticatedSession() && !state.activeConversationId) {
+      const created = await createNewConversation();
+      if (!created) return;
+    }
+
     // Add user message
     const userMsg = {
       id: 'msg_' + generateId(8),
@@ -2335,6 +2548,7 @@ a:hover { text-decoration: underline; }
         body: JSON.stringify({
           user_id: state.userId,
           message: message,
+          ...(state.activeConversationId ? { conversation_id: state.activeConversationId } : {}),
         }),
         signal: controller.signal,
       });
@@ -2565,13 +2779,19 @@ a:hover { text-decoration: underline; }
       localStorage.removeItem(AUTH_USER_KEY);
     }
     window.authUpdateUI = function authUpdateUI() {
-      var user = authGetUser();
-      var tok = authGetToken();
-      if (typeof elements !== 'undefined') {
-        if (typeof elements.authStatusEl !== 'undefined') {
-          elements.authStatusEl.textContent = (user && tok) ? (user.email || 'Signed in') : 'Not signed in';
-        }
+      var user = window.authGetUser && window.authGetUser();
+      var tok = window.authGetToken && window.authGetToken();
+      var accountStatus = document.getElementById('hermesAuthStatus');
+      if (!accountStatus) return;
+      if (!user || !tok) {
+        accountStatus.textContent = 'Not signed in';
+        accountStatus.removeAttribute('title');
+        return;
       }
+      var name = user.user_metadata && user.user_metadata.full_name || user.user_metadata && user.user_metadata.name || user.name || '';
+      var email = user.email || '';
+      accountStatus.textContent = name && email && name !== email ? (name + ' · ' + email) : (email || name || 'Signed in');
+      accountStatus.title = email || name || 'Signed in';
     }
     window.authSignOut = function authSignOut() {
       authClear();

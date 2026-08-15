@@ -1,5 +1,7 @@
 import json
 import os
+import uuid
+from datetime import datetime, timezone
 import requests
 from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
@@ -56,6 +58,180 @@ def _record_authenticated_chat(user_id, user_message, bot_reply):
         # Recording is best-effort; the chat reply already succeeded.
         pass
 
+
+def _supabase_headers(prefer=None):
+    headers = {
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "apikey": SUPABASE_ANON_KEY or "",
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+    return headers
+
+
+def _require_authenticated_user():
+    claims, auth_err = get_auth_header_claims(request)
+    if auth_err:
+        return None, (jsonify({"error": "Invalid authentication token."}), 401)
+    if not claims:
+        return None, (jsonify({"error": "Authentication is required."}), 401)
+    user_id = claims.get("sub") or claims.get("user_id")
+    if not user_id:
+        return None, (jsonify({"error": "Authenticated user identity is missing."}), 401)
+    return user_id, None
+
+
+def _conversation_title(message):
+    normalized = " ".join(str(message or "").split())
+    return (normalized[:72] or "New conversation")
+
+
+def _valid_uuid(value):
+    try:
+        return str(uuid.UUID(str(value)))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def _get_owned_conversation(user_id, conversation_id):
+    response = requests.get(
+        f"{SUPABASE_URL.rstrip('/')}/rest/v1/chat_conversations",
+        headers=_supabase_headers(),
+        params={
+            "select": "id,title,created_at,updated_at",
+            "id": f"eq.{conversation_id}",
+            "user_id": f"eq.{user_id}",
+            "limit": "1",
+        },
+        timeout=20,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError("Conversation store is unavailable.")
+    rows = response.json()
+    return rows[0] if rows else None
+
+
+def _get_conversation_messages(conversation_id, limit=40):
+    response = requests.get(
+        f"{SUPABASE_URL.rstrip('/')}/rest/v1/chat_messages",
+        headers=_supabase_headers(),
+        params={
+            "select": "id,role,content,created_at",
+            "conversation_id": f"eq.{conversation_id}",
+            "order": "created_at.asc,id.asc",
+            "limit": str(limit),
+        },
+        timeout=20,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError("Conversation messages are unavailable.")
+    return response.json()
+
+
+def _record_conversation_turn(user_id, conversation_id, user_message, bot_reply):
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("Conversation storage is not configured.")
+
+    now = datetime.now(timezone.utc).isoformat()
+    response = requests.post(
+        f"{SUPABASE_URL.rstrip('/')}/rest/v1/chat_messages",
+        headers=_supabase_headers("return=minimal"),
+        json=[
+            {"conversation_id": conversation_id, "user_id": user_id, "role": "user", "content": user_message},
+            {"conversation_id": conversation_id, "user_id": user_id, "role": "assistant", "content": bot_reply},
+        ],
+        timeout=20,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError("Conversation message persistence failed.")
+
+    update = {"updated_at": now}
+    conversation = _get_owned_conversation(user_id, conversation_id)
+    if conversation and conversation.get("title") == "New conversation":
+        update["title"] = _conversation_title(user_message)
+    response = requests.patch(
+        f"{SUPABASE_URL.rstrip('/')}/rest/v1/chat_conversations",
+        headers=_supabase_headers("return=minimal"),
+        params={"id": f"eq.{conversation_id}", "user_id": f"eq.{user_id}"},
+        json=update,
+        timeout=20,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError("Conversation update failed.")
+
+
+@app.route("/conversations", methods=["GET"])
+def list_conversations():
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        return jsonify({"error": "Conversation storage is not configured."}), 503
+    try:
+        response = requests.get(
+            f"{SUPABASE_URL.rstrip('/')}/rest/v1/chat_conversations",
+            headers=_supabase_headers(),
+            params={
+                "select": "id,title,created_at,updated_at",
+                "user_id": f"eq.{user_id}",
+                "order": "updated_at.desc",
+                "limit": "100",
+            },
+            timeout=20,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError("Conversation store is unavailable.")
+        return jsonify({"conversations": response.json()}), 200
+    except (requests.RequestException, ValueError, RuntimeError):
+        return jsonify({"error": "Conversation history is temporarily unavailable."}), 503
+
+
+@app.route("/conversations", methods=["POST"])
+def create_conversation():
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        return jsonify({"error": "Conversation storage is not configured."}), 503
+    conversation = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "title": "New conversation",
+    }
+    try:
+        response = requests.post(
+            f"{SUPABASE_URL.rstrip('/')}/rest/v1/chat_conversations",
+            headers=_supabase_headers("return=representation"),
+            json=conversation,
+            timeout=20,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError("Conversation creation failed.")
+        rows = response.json()
+        return jsonify({"conversation": rows[0] if rows else conversation}), 201
+    except (requests.RequestException, ValueError, RuntimeError):
+        return jsonify({"error": "Conversation history is temporarily unavailable."}), 503
+
+
+@app.route("/conversations/<conversation_id>/messages", methods=["GET"])
+def get_conversation_messages(conversation_id):
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    normalized_id = _valid_uuid(conversation_id)
+    if not normalized_id:
+        return jsonify({"error": "Conversation was not found."}), 404
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        return jsonify({"error": "Conversation storage is not configured."}), 503
+    try:
+        conversation = _get_owned_conversation(user_id, normalized_id)
+        if not conversation:
+            return jsonify({"error": "Conversation was not found."}), 404
+        return jsonify({"conversation": conversation, "messages": _get_conversation_messages(normalized_id)}), 200
+    except (requests.RequestException, ValueError, RuntimeError):
+        return jsonify({"error": "Conversation history is temporarily unavailable."}), 503
+
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
@@ -103,6 +279,7 @@ def health():
 def chat():
     data = request.get_json(silent=True) or {}
     user_message = str(data.get("message", "")).strip()
+    requested_conversation_id = data.get("conversation_id")
 
     if not user_message:
         return jsonify({"error": "No message provided"}), 400
@@ -181,6 +358,22 @@ def chat():
                 record_uid = claims.get("sub") or claims.get("user_id")
                 if record_uid:
                     _record_authenticated_chat(record_uid, user_message, reply)
+
+                    # Phase 3-B: only an explicitly selected, authenticated
+                    # conversation gets durable transcript storage. Requests
+                    # without a conversation_id retain the prior chat flow.
+                    if requested_conversation_id:
+                        conversation_id = _valid_uuid(requested_conversation_id)
+                        if not conversation_id:
+                            return jsonify({"error": "Conversation was not found."}), 404
+                        if not _get_owned_conversation(record_uid, conversation_id):
+                            return jsonify({"error": "Conversation was not found."}), 404
+                        _record_conversation_turn(
+                            record_uid,
+                            conversation_id,
+                            user_message,
+                            reply,
+                        )
         except Exception:
             # Never break chat on identity-layer exceptions.
             pass
