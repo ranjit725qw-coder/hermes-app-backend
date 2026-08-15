@@ -72,11 +72,57 @@ class ConversationHistoryRoutesTest(unittest.TestCase):
              patch.object(hermes_app, "get_auth_header_claims", return_value=(self.user_claims, None)), \
              patch.object(hermes_app, "_record_authenticated_chat"), \
              patch.object(hermes_app, "_get_owned_conversation", return_value=conversation), \
+             patch.object(hermes_app, "_get_recent_conversation_context", return_value=[]), \
              patch.object(hermes_app, "_record_conversation_turn") as record_turn:
             response = self.client.post("/chat", json={"message": "Remember this", "conversation_id": self.conversation_id})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["auth_mode"], "authenticated")
         record_turn.assert_called_once_with(self.user_claims["sub"], self.conversation_id, "Remember this", "Local test reply")
+
+    def test_authenticated_continuation_sends_prior_turns_to_model_in_order(self):
+        llm = FakeResponse(200, {"choices": [{"message": {"content": "Context-aware reply"}}]})
+        conversation = {"id": self.conversation_id, "title": "First question"}
+        persisted_turns = [
+            {"role": "user", "content": "First question"},
+            {"role": "assistant", "content": "First answer"},
+            {"role": "user", "content": "Second question"},
+            {"role": "assistant", "content": "Second answer"},
+        ]
+        with patch.object(hermes_app.requests, "post", return_value=llm) as post, \
+             patch.object(hermes_app, "get_auth_header_claims", return_value=(self.user_claims, None)), \
+             patch.object(hermes_app, "_get_owned_conversation", return_value=conversation), \
+             patch.object(hermes_app, "_get_recent_conversation_context", return_value=persisted_turns), \
+             patch.object(hermes_app, "_record_authenticated_chat"), \
+             patch.object(hermes_app, "_record_conversation_turn"):
+            response = self.client.post("/chat", json={"message": "Continue from here", "conversation_id": self.conversation_id})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(post.call_args.kwargs["json"]["messages"], persisted_turns + [{"role": "user", "content": "Continue from here"}])
+
+    def test_unowned_continuation_is_rejected_before_model_call(self):
+        with patch.object(hermes_app.requests, "post") as post, \
+             patch.object(hermes_app, "get_auth_header_claims", return_value=(self.user_claims, None)), \
+             patch.object(hermes_app, "_get_owned_conversation", return_value=None):
+            response = self.client.post("/chat", json={"message": "Do not send", "conversation_id": self.conversation_id})
+        self.assertEqual(response.status_code, 404)
+        post.assert_not_called()
+
+    def test_delete_conversation_is_scoped_to_owned_conversation(self):
+        owned = {"id": self.conversation_id, "user_id": self.user_claims["sub"]}
+        with patch.object(hermes_app, "get_auth_header_claims", return_value=(self.user_claims, None)), \
+             patch.object(hermes_app, "_get_owned_conversation", return_value=owned), \
+             patch.object(hermes_app.requests, "delete", return_value=FakeResponse(204, [])) as delete:
+            response = self.client.delete(f"/conversations/{self.conversation_id}")
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(delete.call_args.kwargs["params"]["id"], f"eq.{self.conversation_id}")
+        self.assertEqual(delete.call_args.kwargs["params"]["user_id"], f"eq.{self.user_claims['sub']}")
+
+    def test_delete_conversation_rejects_unowned_id_without_delete_call(self):
+        with patch.object(hermes_app, "get_auth_header_claims", return_value=(self.user_claims, None)), \
+             patch.object(hermes_app, "_get_owned_conversation", return_value=None), \
+             patch.object(hermes_app.requests, "delete") as delete:
+            response = self.client.delete(f"/conversations/{self.conversation_id}")
+        self.assertEqual(response.status_code, 404)
+        delete.assert_not_called()
 
     def test_saved_messages_include_authenticated_owner_required_by_schema(self):
         with patch.object(hermes_app.requests, "post", return_value=FakeResponse(201, [])) as post, \
@@ -94,12 +140,13 @@ class ConversationHistoryRoutesTest(unittest.TestCase):
 
     def test_anonymous_chat_stays_without_conversation_persistence(self):
         llm = FakeResponse(200, {"choices": [{"message": {"content": "Anonymous reply"}}]})
-        with patch.object(hermes_app.requests, "post", return_value=llm), \
+        with patch.object(hermes_app.requests, "post", return_value=llm) as post, \
              patch.object(hermes_app, "get_auth_header_claims", return_value=(None, None)), \
              patch.object(hermes_app, "_record_conversation_turn") as record_turn:
             response = self.client.post("/chat", json={"message": "Anonymous hello"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["auth_mode"], "anonymous")
+        self.assertEqual(post.call_args.kwargs["json"]["messages"], [{"role": "user", "content": "Anonymous hello"}])
         record_turn.assert_not_called()
 
 
@@ -112,6 +159,12 @@ class LocalArtifactTest(unittest.TestCase):
         self.assertIn("id=\"newChatBtn\"", html)
         self.assertIn("window.authGetUser && window.authGetUser()", html)
         self.assertIn("conversation_id", html)
+        self.assertIn("id=\"logoutBtn\"", html)
+        self.assertIn("window.authSignOut", html)
+        self.assertIn("deleteConversation", html)
+        self.assertIn("method: 'DELETE'", html)
+        self.assertIn("overflow-wrap: anywhere", html)
+        self.assertIn("min-width: 0", html)
 
     def test_migration_is_additive_and_does_not_modify_legacy_memory(self):
         root = os.path.dirname(os.path.abspath(hermes_app.__file__))

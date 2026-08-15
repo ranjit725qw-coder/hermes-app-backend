@@ -129,6 +129,25 @@ def _get_conversation_messages(conversation_id, limit=40):
     return response.json()
 
 
+def _get_recent_conversation_context(conversation_id, limit=40):
+    """Return the most recent persisted turns in chronological model order."""
+    response = requests.get(
+        f"{SUPABASE_URL.rstrip('/')}/rest/v1/chat_messages",
+        headers=_supabase_headers(),
+        params={
+            "select": "role,content,created_at,id",
+            "conversation_id": f"eq.{conversation_id}",
+            "order": "created_at.desc,id.desc",
+            "limit": str(limit),
+        },
+        timeout=20,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError("Conversation messages are unavailable.")
+    rows = response.json()
+    return list(reversed(rows))
+
+
 def _record_conversation_turn(user_id, conversation_id, user_message, bot_reply):
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise RuntimeError("Conversation storage is not configured.")
@@ -232,6 +251,33 @@ def get_conversation_messages(conversation_id):
     except (requests.RequestException, ValueError, RuntimeError):
         return jsonify({"error": "Conversation history is temporarily unavailable."}), 503
 
+
+@app.route("/conversations/<conversation_id>", methods=["DELETE"])
+def delete_conversation(conversation_id):
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    normalized_id = _valid_uuid(conversation_id)
+    if not normalized_id:
+        return jsonify({"error": "Conversation was not found."}), 404
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        return jsonify({"error": "Conversation storage is not configured."}), 503
+    try:
+        conversation = _get_owned_conversation(user_id, normalized_id)
+        if not conversation:
+            return jsonify({"error": "Conversation was not found."}), 404
+        response = requests.delete(
+            f"{SUPABASE_URL.rstrip('/')}/rest/v1/chat_conversations",
+            headers=_supabase_headers("return=minimal"),
+            params={"id": f"eq.{normalized_id}", "user_id": f"eq.{user_id}"},
+            timeout=20,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError("Conversation deletion failed.")
+        return "", 204
+    except (requests.RequestException, ValueError, RuntimeError):
+        return jsonify({"error": "Conversation history is temporarily unavailable."}), 503
+
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
@@ -287,6 +333,30 @@ def chat():
     if not HERMES_KEY:
         return jsonify({"error": "Hermes API server key is not configured"}), 500
 
+    # Keep anonymous chat exactly single-turn. For an authenticated selected
+    # conversation, validate ownership and assemble durable prior turns before
+    # calling the model so an old/reopened chat can continue coherently.
+    auth_mode = "anonymous"
+    record_uid = None
+    conversation_id = None
+    conversation_context = []
+    try:
+        claims, auth_err = get_auth_header_claims(request)
+        if auth_err:
+            return jsonify({"error": "Invalid authentication token.", "detail": auth_err}), 401
+        if claims:
+            auth_mode = "authenticated"
+            record_uid = claims.get("sub") or claims.get("user_id")
+            if requested_conversation_id:
+                conversation_id = _valid_uuid(requested_conversation_id)
+                if not conversation_id:
+                    return jsonify({"error": "Conversation was not found."}), 404
+                if not record_uid or not _get_owned_conversation(record_uid, conversation_id):
+                    return jsonify({"error": "Conversation was not found."}), 404
+                conversation_context = _get_recent_conversation_context(conversation_id)
+    except (requests.RequestException, ValueError, RuntimeError):
+        return jsonify({"error": "Conversation history is temporarily unavailable."}), 503
+
     headers = {
         "Authorization": f"Bearer {HERMES_KEY}",
         "Content-Type": "application/json"
@@ -295,15 +365,13 @@ def chat():
     # REST Payload strictly utilizing the explicit model string.
     # Provider mapping handles resolving to Amazon Bedrock
     # (bedrock-mantle Chat Completions) seamlessly.
-    payload = {
-        "model": MODEL_NAME,
-        "messages": [
-            {
-                "role": "user",
-                "content": user_message
-            }
-        ]
-    }
+    messages = [
+        {"role": row["role"], "content": row["content"]}
+        for row in conversation_context
+        if row.get("role") in ("user", "assistant") and isinstance(row.get("content"), str) and row["content"]
+    ]
+    messages.append({"role": "user", "content": user_message})
+    payload = {"model": MODEL_NAME, "messages": messages}
 
     try:
         response = requests.post(
@@ -344,36 +412,19 @@ def chat():
                 "detail": result
             }), 502
 
-        # Phase 3-A: optional identity layer.
-        # Anonymous requests (no Authorization header) flow through exactly
-        # as before. Authenticated requests carry a validated Supabase JWT;
-        # we additionally record the turn under auth.uid in chat_memory.
-        auth_mode = "anonymous"
+        # Phase 3-A: optional identity layer. Anonymous requests continue to
+        # bypass all persistence. Authenticated requests retain legacy
+        # chat_memory recording and selected-conversation persistence.
         try:
-            claims, auth_err = get_auth_header_claims(request)
-            if auth_err:
-                return jsonify({"error": "Invalid authentication token.", "detail": auth_err}), 401
-            if claims:
-                auth_mode = "authenticated"
-                record_uid = claims.get("sub") or claims.get("user_id")
-                if record_uid:
-                    _record_authenticated_chat(record_uid, user_message, reply)
-
-                    # Phase 3-B: only an explicitly selected, authenticated
-                    # conversation gets durable transcript storage. Requests
-                    # without a conversation_id retain the prior chat flow.
-                    if requested_conversation_id:
-                        conversation_id = _valid_uuid(requested_conversation_id)
-                        if not conversation_id:
-                            return jsonify({"error": "Conversation was not found."}), 404
-                        if not _get_owned_conversation(record_uid, conversation_id):
-                            return jsonify({"error": "Conversation was not found."}), 404
-                        _record_conversation_turn(
-                            record_uid,
-                            conversation_id,
-                            user_message,
-                            reply,
-                        )
+            if record_uid:
+                _record_authenticated_chat(record_uid, user_message, reply)
+                if conversation_id:
+                    _record_conversation_turn(
+                        record_uid,
+                        conversation_id,
+                        user_message,
+                        reply,
+                    )
         except Exception:
             # Never break chat on identity-layer exceptions.
             pass
