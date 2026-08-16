@@ -11,13 +11,17 @@ import app as hermes_app
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, payload=None, text=""):
+    def __init__(self, status_code=200, payload=None, text="", lines=None):
         self.status_code = status_code
         self._payload = payload if payload is not None else {}
         self.text = text
+        self._lines = lines or []
 
     def json(self):
         return self._payload
+
+    def iter_lines(self, decode_unicode=False):
+        return iter(self._lines)
 
 
 class ConversationHistoryRoutesTest(unittest.TestCase):
@@ -97,6 +101,45 @@ class ConversationHistoryRoutesTest(unittest.TestCase):
             response = self.client.post("/chat", json={"message": "Continue from here", "conversation_id": self.conversation_id})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(post.call_args.kwargs["json"]["messages"], persisted_turns + [{"role": "user", "content": "Continue from here"}])
+
+    def test_live_run_terminal_completion_persists_one_owned_turn_after_verified_result(self):
+        hermes_app.RUN_REGISTRY.clear()
+        run_id = hermes_app._create_progress_run(
+            self.user_claims["sub"], self.conversation_id, "Continue from here", []
+        )
+        upstream_created = FakeResponse(201, {"run_id": "gateway-run-1"})
+        stream = FakeResponse(200, {}, ["event: run.completed", "data: {}", ""])
+        final_status = FakeResponse(200, {"status": "completed", "output": "Streamed final reply"})
+        with patch.object(hermes_app.requests, "post", return_value=upstream_created), \
+             patch.object(hermes_app.requests, "get", side_effect=[stream, final_status]), \
+             patch.object(hermes_app, "_record_authenticated_chat") as legacy_record, \
+             patch.object(hermes_app, "_record_conversation_turn") as conversation_record:
+            hermes_app._execute_progress_run(run_id)
+        run = hermes_app.RUN_REGISTRY[run_id]
+        self.assertEqual(run["status"], "completed")
+        self.assertTrue(run["persisted"])
+        self.assertEqual(run["reply"], "Streamed final reply")
+        legacy_record.assert_called_once_with(self.user_claims["sub"], "Continue from here", "Streamed final reply")
+        conversation_record.assert_called_once_with(
+            self.user_claims["sub"], self.conversation_id, "Continue from here", "Streamed final reply"
+        )
+
+    def test_live_run_failure_never_persists_partial_turn(self):
+        hermes_app.RUN_REGISTRY.clear()
+        run_id = hermes_app._create_progress_run(
+            self.user_claims["sub"], self.conversation_id, "Do not persist", []
+        )
+        upstream_created = FakeResponse(201, {"run_id": "gateway-run-2"})
+        stream = FakeResponse(200, {}, ["event: run.failed", "data: {}", ""])
+        final_status = FakeResponse(200, {"status": "failed"})
+        with patch.object(hermes_app.requests, "post", return_value=upstream_created), \
+             patch.object(hermes_app.requests, "get", side_effect=[stream, final_status]), \
+             patch.object(hermes_app, "_record_authenticated_chat") as legacy_record, \
+             patch.object(hermes_app, "_record_conversation_turn") as conversation_record:
+            hermes_app._execute_progress_run(run_id)
+        self.assertEqual(hermes_app.RUN_REGISTRY[run_id]["status"], "failed")
+        legacy_record.assert_not_called()
+        conversation_record.assert_not_called()
 
     def test_history_restore_query_orders_timestamp_ties_user_before_assistant(self):
         rows = [

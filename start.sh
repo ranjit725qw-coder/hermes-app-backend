@@ -299,5 +299,7 @@ echo "=== REAL HERMES AGENT IS READY ==="
 exec gunicorn \
     --bind "0.0.0.0:${PORT:-10000}" \
     --workers 1 \
+    --threads 8 \
+    --worker-class gthread \
     --timeout 240 \
     app:app

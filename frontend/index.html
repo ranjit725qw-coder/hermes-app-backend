@@ -889,6 +889,34 @@ a:hover { text-decoration: underline; }
   }
 }
 
+/* ---------- AGENT ACTIVITY ---------- */
+.agent-activity {
+  width: min(100%, 720px);
+  margin: var(--space-3) 0 var(--space-4) 44px;
+  padding: var(--space-4);
+  background: var(--ai-bubble);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  animation: messageIn 0.24s var(--transition-fast);
+}
+.agent-activity-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.agent-activity-title { color: var(--text-primary); font-size: 14px; font-weight: 700; }
+.agent-activity-elapsed { color: var(--text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.agent-activity-list { display: grid; gap: var(--space-2); margin: var(--space-3) 0 0; padding: 0; list-style: none; }
+.agent-activity-item { display: grid; grid-template-columns: 20px minmax(0, 1fr); align-items: start; gap: var(--space-2); color: var(--text-secondary); font-size: 13px; line-height: 1.4; }
+.agent-activity-icon { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 999px; color: var(--text-muted); font-size: 13px; }
+.agent-activity-item.completed .agent-activity-icon { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
+.agent-activity-item.active { color: var(--text-primary); font-weight: 600; }
+.agent-activity-item.active .agent-activity-icon { background: var(--accent-subtle); color: var(--accent); }
+.agent-activity-item.waiting .agent-activity-icon { background: color-mix(in srgb, var(--warning) 14%, transparent); color: var(--warning); }
+.agent-activity-item.failed .agent-activity-icon { background: color-mix(in srgb, var(--error) 14%, transparent); color: var(--error); }
+.agent-activity-summary { margin: var(--space-3) 0 0 28px; color: var(--text-muted); font-size: 12px; }
+.agent-activity-terminal { margin: var(--space-3) 0 0 28px; color: var(--success); font-size: 13px; font-weight: 700; }
+.agent-activity-interrupted { margin: var(--space-3) 0 0 28px; color: var(--text-muted); font-size: 12px; }
+@media (max-width: 600px) { .agent-activity { margin-left: 0; } }
+@media (prefers-reduced-motion: reduce) { .agent-activity { animation: none; } }
+
 /* ---------- COMPOSER ---------- */
 .composer {
   flex-shrink: 0;
@@ -1692,6 +1720,7 @@ a:hover { text-decoration: underline; }
     API_TIMEOUT: 120000, // 120 seconds
     USER_ID_KEY: 'hermes_user_id',
     SETTINGS_KEY: 'hermes_settings',
+    PROGRESS_RUN_KEY: 'hermes_active_progress_run',
     SPLASH_DURATION: 2000,
   };
 
@@ -1712,6 +1741,7 @@ a:hover { text-decoration: underline; }
     conversations: [],
     activeConversationId: null,
     confirmResolve: null,
+    activeProgressRun: null,
   };
 
   // ---------- DOM REFERENCES ----------
@@ -1763,6 +1793,8 @@ a:hover { text-decoration: underline; }
     renderInitialView();
     checkBackendStatus();
     setupNetworkListeners();
+    window.addEventListener('hermes-auth-cleared', clearActiveProgressRun);
+    setTimeout(restoreActiveProgressRun, 1700);
 
     // Hide splash after duration
     setTimeout(() => {
@@ -1999,6 +2031,7 @@ a:hover { text-decoration: underline; }
       return;
     }
     const signOutTask = window.authSignOut ? window.authSignOut() : null;
+    clearActiveProgressRun();
     state.activeConversationId = null;
     state.conversations = [];
     state.messages = [];
@@ -2364,6 +2397,206 @@ a:hover { text-decoration: underline; }
     if (indicator) indicator.remove();
   }
 
+  // ---------- LIVE AGENT ACTIVITY (AUTHENTICATED RUNS ONLY) ----------
+  function progressRunStorageKey() {
+    const user = window.authGetUser && window.authGetUser();
+    const account = user && (user.id || user.email);
+    return account ? CONFIG.PROGRESS_RUN_KEY + ':' + String(account).toLowerCase() : null;
+  }
+
+  function persistActiveProgressRun(run) {
+    const key = progressRunStorageKey();
+    if (!key || !run || run.terminal) return;
+    try { sessionStorage.setItem(key, JSON.stringify({ runId: run.runId, lastSequence: run.lastSequence || 0 })); }
+    catch (ignore) {}
+  }
+
+  function clearActiveProgressRun() {
+    const key = progressRunStorageKey();
+    if (key) { try { sessionStorage.removeItem(key); } catch (ignore) {} }
+    state.activeProgressRun = null;
+    const card = $('#agentActivity');
+    if (card) card.remove();
+  }
+
+  function progressIconFor(event) {
+    if (event.state === 'completed') return '✓';
+    if (event.state === 'waiting') return '⏳';
+    if (event.state === 'failed') return '!';
+    return '◉';
+  }
+
+  function renderAgentActivity(run) {
+    let card = $('#agentActivity');
+    if (!card) {
+      const emptyState = elements.chatContent.querySelector('.empty-state');
+      if (emptyState) elements.chatContent.innerHTML = '';
+      card = document.createElement('section');
+      card.id = 'agentActivity';
+      card.className = 'agent-activity';
+      card.setAttribute('aria-live', 'polite');
+      elements.chatContent.appendChild(card);
+    }
+    card.textContent = '';
+    const header = document.createElement('div');
+    header.className = 'agent-activity-header';
+    const title = document.createElement('span');
+    title.className = 'agent-activity-title';
+    title.textContent = 'Agent activity';
+    const elapsed = document.createElement('span');
+    elapsed.className = 'agent-activity-elapsed';
+    elapsed.textContent = run.startedAt ? Math.max(0, Math.floor((Date.now() - run.startedAt) / 1000)) + 's' : '';
+    header.append(title, elapsed);
+    card.appendChild(header);
+    const list = document.createElement('ol');
+    list.className = 'agent-activity-list';
+    run.events.forEach((event) => {
+      const item = document.createElement('li');
+      item.className = 'agent-activity-item ' + event.state;
+      const icon = document.createElement('span');
+      icon.className = 'agent-activity-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = progressIconFor(event);
+      const label = document.createElement('span');
+      label.textContent = event.label;
+      item.append(icon, label);
+      list.appendChild(item);
+    });
+    card.appendChild(list);
+    const completed = run.events.filter((event) => event.state === 'completed').length;
+    if (completed) {
+      const summary = document.createElement('p');
+      summary.className = 'agent-activity-summary';
+      summary.textContent = completed + ' completed step' + (completed === 1 ? '' : 's');
+      card.appendChild(summary);
+    }
+    if (run.interrupted && !run.terminal) {
+      const interrupted = document.createElement('p');
+      interrupted.className = 'agent-activity-interrupted';
+      interrupted.textContent = 'Connection interrupted — checking task status';
+      card.appendChild(interrupted);
+    }
+    if (run.events.some((event) => event.kind === 'complete' && event.state === 'completed')) {
+      const terminal = document.createElement('p');
+      terminal.className = 'agent-activity-terminal';
+      terminal.textContent = 'Task complete';
+      card.appendChild(terminal);
+    }
+    handleAutoScroll();
+  }
+
+  function applyProgressEvent(run, event) {
+    if (!event || event.run_id !== run.runId || !Number.isInteger(event.sequence) || event.sequence <= run.lastSequence) return false;
+    if (!['active', 'completed', 'waiting', 'failed'].includes(event.state) || typeof event.kind !== 'string' || typeof event.label !== 'string' || event.label.length > 120) return false;
+    run.lastSequence = event.sequence;
+    run.events.push({ state: event.state, kind: event.kind, label: event.label });
+    if (event.kind === 'complete' || event.kind === 'failed') run.terminal = true;
+    if (event.state === 'waiting' && event.kind === 'approval') run.waiting = true;
+    persistActiveProgressRun(run);
+    renderAgentActivity(run);
+    return true;
+  }
+
+  function parseProgressFrame(run, frame) {
+    const dataLine = frame.split('\n').find((line) => line.indexOf('data:') === 0);
+    if (!dataLine) return;
+    try { applyProgressEvent(run, JSON.parse(dataLine.slice(5).trim())); } catch (ignore) {}
+  }
+
+  async function consumeProgressStream(run) {
+    const streamHeaders = {};
+    hermesSendAuthHeaders(streamHeaders);
+    const response = await fetch(getApiBase() + '/chat/progress/' + encodeURIComponent(run.runId), { headers: streamHeaders });
+    if (response.status === 401) throw new Error('Authentication token was rejected — please sign in again.');
+    if (!response.ok || !response.body) throw new Error('Progress stream unavailable.');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      buffer += decoder.decode(next.value, { stream: true });
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop();
+      frames.forEach((frame) => parseProgressFrame(run, frame));
+      if (run.terminal || run.waiting) { try { await reader.cancel(); } catch (ignore) {} break; }
+    }
+    if (!run.terminal) {
+      run.interrupted = true;
+      renderAgentActivity(run);
+      await reconcileProgressRun(run);
+    }
+    if (run.events.some((event) => event.kind === 'complete' && event.state === 'completed')) {
+      await receiveProgressResult(run);
+    } else if (run.events.some((event) => event.kind === 'failed')) {
+      throw new Error('Progress run did not complete.');
+    }
+  }
+
+  async function reconcileProgressRun(run) {
+    const data = await historyFetch('/chat/runs/' + encodeURIComponent(run.runId));
+    if (data.status === 'completed' && data.result_ready) {
+      applyProgressEvent(run, { run_id: run.runId, sequence: Number(data.last_sequence) + 1, state: 'completed', kind: 'complete', label: 'Task complete' });
+    } else if (data.status === 'failed') {
+      applyProgressEvent(run, { run_id: run.runId, sequence: Number(data.last_sequence) + 1, state: 'failed', kind: 'failed', label: 'Task could not be completed' });
+    }
+  }
+
+  async function receiveProgressResult(run) {
+    if (run.resultLoading || run.resultReceived) return;
+    run.resultLoading = true;
+    try {
+      const data = await historyFetch('/chat/runs/' + encodeURIComponent(run.runId) + '/result');
+      const reply = data.reply || '';
+      if (!reply) throw new Error('Empty progress result');
+      run.resultReceived = true;
+      state.messages.push({ id: 'msg_' + generateId(8), role: 'ai', content: reply, timestamp: Date.now(), parentId: state.lastUserMessage?.id });
+      appendMessage(state.messages[state.messages.length - 1]);
+      run.terminal = true;
+      const key = progressRunStorageKey();
+      if (key) { try { sessionStorage.removeItem(key); } catch (ignore) {} }
+      state.activeProgressRun = null;
+    } finally { run.resultLoading = false; }
+  }
+
+  async function tryProgressMessage(message) {
+    if (!hasAuthenticatedSession()) return false;
+    const runHeaders = { 'Content-Type': 'application/json' };
+    hermesSendAuthHeaders(runHeaders);
+    const response = await fetch(getApiBase() + '/chat/runs', {
+      method: 'POST', headers: runHeaders,
+      body: JSON.stringify({ message: message, ...(state.activeConversationId ? { conversation_id: state.activeConversationId } : {}) }),
+    });
+    if (response.status === 404 || response.status === 503) return false;
+    if (response.status === 401) throw new Error('Authentication token was rejected — please sign in again.');
+    if (!response.ok) throw new Error('Progress run could not be started.');
+    const data = await response.json();
+    if (!data.run_id) throw new Error('Progress run could not be started.');
+    const run = { runId: data.run_id, lastSequence: 0, events: [], terminal: false, interrupted: false, startedAt: Date.now() };
+    state.activeProgressRun = run;
+    state.isTyping = false;
+    removeTypingIndicator();
+    persistActiveProgressRun(run);
+    renderAgentActivity(run);
+    await consumeProgressStream(run);
+    return true;
+  }
+
+  async function restoreActiveProgressRun() {
+    if (!hasAuthenticatedSession() || state.activeProgressRun) return;
+    const key = progressRunStorageKey();
+    if (!key) return;
+    try {
+      const stored = JSON.parse(sessionStorage.getItem(key) || 'null');
+      if (!stored || !stored.runId) return;
+      const run = { runId: stored.runId, lastSequence: Number(stored.lastSequence) || 0, events: [], terminal: false, interrupted: true, startedAt: Date.now() };
+      state.activeProgressRun = run;
+      renderAgentActivity(run);
+      await reconcileProgressRun(run);
+      if (run.terminal && run.events.some((event) => event.kind === 'complete')) await receiveProgressResult(run);
+    } catch (ignore) { clearActiveProgressRun(); }
+  }
+
   // ---------- ACTIONS ----------
   function handleAction(e, btn, msg) {
     const action = btn.dataset.action;
@@ -2693,6 +2926,21 @@ a:hover { text-decoration: underline; }
     appendTypingIndicator();
 
     try {
+      if (await tryProgressMessage(message)) return;
+      await sendOneShotMessage(message);
+    } catch (error) {
+      if (error.message && error.message.includes('Authentication token was rejected')) authSignOut();
+      removeTypingIndicator();
+      state.isTyping = false;
+      handleApiError(error);
+    } finally {
+      state.isSending = false;
+      updateSendButton();
+    }
+  }
+
+  async function sendOneShotMessage(message) {
+    try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), CONFIG.API_TIMEOUT);
 
@@ -2745,14 +2993,6 @@ a:hover { text-decoration: underline; }
 
       state.messages.push(aiMsg);
       appendMessage(aiMsg);
-
-    } catch (error) {
-      removeTypingIndicator();
-      state.isTyping = false;
-      handleApiError(error);
-    } finally {
-      state.isSending = false;
-      updateSendButton();
     }
   }
 
@@ -2933,6 +3173,7 @@ a:hover { text-decoration: underline; }
     window.authClear = function authClear() {
       localStorage.removeItem(AUTH_KEY);
       localStorage.removeItem(AUTH_USER_KEY);
+      try { window.dispatchEvent(new CustomEvent('hermes-auth-cleared')); } catch (ignore) {}
     }
     window.authUpdateUI = function authUpdateUI() {
       var user = window.authGetUser && window.authGetUser();

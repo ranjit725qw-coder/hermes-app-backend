@@ -1,7 +1,13 @@
 import json
+import ipaddress
+import json
 import os
+import re
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 import requests
 from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
@@ -25,6 +31,294 @@ if not HERMES_KEY:
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL") or "https://bjoljeysryycwflhcnha.supabase.co"
+
+# Phase 1 live-progress state is deliberately short-lived and process-local.
+# Gunicorn remains a single worker process so owner-scoped stream readers share
+# this registry. Nothing here is durable user data or a substitute for History.
+RUN_REGISTRY = {}
+RUN_REGISTRY_LOCK = threading.RLock()
+RUN_TTL_SECONDS = 15 * 60
+RUN_EVENT_LIMIT = 80
+PUBLIC_HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$", re.I)
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _public_hostname(value):
+    """Return a public hostname only; private, malformed, and path values drop."""
+    if not isinstance(value, str) or len(value) > 512:
+        return None
+    candidate = value.strip()
+    if not candidate or any(character in candidate for character in ("\r", "\n", "@", "?", "#")):
+        return None
+    parsed = urlparse(candidate if "://" in candidate else "//" + candidate)
+    if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
+        return None
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not host or host == "localhost" or not PUBLIC_HOST_RE.fullmatch(host):
+        return None
+    try:
+        ipaddress.ip_address(host)
+        return None
+    except ValueError:
+        return host
+
+
+def _safe_progress_event(run_id, sequence, state, kind, label):
+    """Create the only event shape the public frontend is allowed to receive."""
+    return {
+        "run_id": run_id,
+        "sequence": sequence,
+        "state": state,
+        "kind": kind,
+        "label": label,
+        "occurred_at": _utc_now(),
+    }
+
+
+def _map_gateway_progress_event(event_name, payload):
+    """Deny by default: map known event categories to fixed, non-sensitive labels."""
+    if not isinstance(payload, dict):
+        return None
+    normalized_event = str(event_name or payload.get("type") or "").lower()
+    raw_kind = " ".join(
+        str(payload.get(field) or "")
+        for field in ("type", "event", "tool", "tool_name", "name", "phase", "status")
+    ).lower()
+    combined = normalized_event + " " + raw_kind
+
+    if any(marker in combined for marker in ("approval_required", "input_required", "requires_action")):
+        return ("waiting", "approval", "Waiting for your approval")
+    if any(marker in combined for marker in ("cancelled", "canceled", "failed", "error")):
+        return ("failed", "failed", "Task could not be completed")
+    if "completed" in combined or "run.completed" in combined:
+        return None
+
+    source_value = next((payload.get(field) for field in ("hostname", "host", "domain", "url") if payload.get(field)), None)
+    hostname = _public_hostname(source_value)
+    if any(marker in combined for marker in ("web_search", "search", "browser.search")):
+        return ("active", "web_search", "Searching: " + hostname if hostname else "Searching public sources")
+    if any(marker in combined for marker in ("fetch", "browse", "read_page", "web_read", "review")):
+        return ("active", "source_review", "Reviewing source: " + hostname if hostname else "Reviewing a public source")
+    if any(marker in combined for marker in ("compare", "comparison")):
+        return ("active", "comparison", "Comparing findings")
+    if any(marker in combined for marker in ("analysis", "analyse", "analyze", "reasoning")):
+        return ("active", "analysis", "Analysing collected information")
+    if any(marker in combined for marker in ("test", "pytest", "vitest", "unittest")):
+        return ("active", "tests", "Running tests…")
+    if any(marker in combined for marker in ("code", "edit", "write_file", "patch", "build")):
+        return ("active", "code", "Working on the requested code")
+    return None
+
+
+def _registry_run(run_id, owner_id):
+    with RUN_REGISTRY_LOCK:
+        run = RUN_REGISTRY.get(run_id)
+        if not run or run.get("owner_id") != owner_id:
+            return None
+        return run
+
+
+def _append_run_event(run_id, state, kind, label):
+    with RUN_REGISTRY_LOCK:
+        run = RUN_REGISTRY.get(run_id)
+        if not run:
+            return None
+        run["sequence"] += 1
+        event = _safe_progress_event(run_id, run["sequence"], state, kind, label)
+        run["events"].append(event)
+        del run["events"][:-RUN_EVENT_LIMIT]
+        run["status"] = state
+        run["updated_at"] = event["occurred_at"]
+        return event
+
+
+def _create_progress_run(owner_id, conversation_id, user_message, conversation_context):
+    run_id = str(uuid.uuid4())
+    with RUN_REGISTRY_LOCK:
+        RUN_REGISTRY[run_id] = {
+            "owner_id": owner_id,
+            "conversation_id": conversation_id,
+            "user_message": user_message,
+            "conversation_context": conversation_context,
+            "upstream_run_id": None,
+            "status": "queued",
+            "sequence": 0,
+            "events": [],
+            "reply": None,
+            "persisted": False,
+            "expires_at": time.time() + RUN_TTL_SECONDS,
+            "updated_at": _utc_now(),
+        }
+    _append_run_event(run_id, "completed", "received", "Task received")
+    return run_id
+
+
+def _gateway_headers():
+    return {"Authorization": f"Bearer {HERMES_KEY}", "Content-Type": "application/json"}
+
+
+def _gateway_supports_runs():
+    response = requests.get(f"{HERMES_URL}/v1/capabilities", headers=_gateway_headers(), timeout=8)
+    if response.status_code >= 400:
+        return False
+    capabilities = response.json()
+    features = capabilities.get("features") or {}
+    return bool(features.get("run_submission") and features.get("run_events_sse"))
+
+
+def _parse_sse_lines(lines):
+    event_name = "message"
+    data_lines = []
+    for raw_line in lines:
+        line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
+        if not line:
+            if data_lines:
+                yield event_name, "\n".join(data_lines)
+            event_name, data_lines = "message", []
+            continue
+        if line.startswith("event:"):
+            event_name = line[6:].strip()
+        elif line.startswith("data:"):
+            data_lines.append(line[5:].lstrip())
+    if data_lines:
+        yield event_name, "\n".join(data_lines)
+
+
+def _extract_run_reply(status_payload):
+    candidate = status_payload.get("output") or status_payload.get("response")
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()
+    if isinstance(candidate, list):
+        parts = []
+        for item in candidate:
+            if isinstance(item, dict):
+                content = item.get("text") or item.get("content")
+                if isinstance(content, str):
+                    parts.append(content)
+        reply = "\n".join(parts).strip()
+        return reply or None
+    return None
+
+
+def _sync_upstream_run_status(run_id):
+    run = _registry_run(run_id, RUN_REGISTRY.get(run_id, {}).get("owner_id"))
+    if not run or not run.get("upstream_run_id") or run.get("status") in ("completed", "failed", "waiting"):
+        return run
+    try:
+        response = requests.get(
+            f"{HERMES_URL}/v1/runs/{run['upstream_run_id']}", headers=_gateway_headers(), timeout=8
+        )
+        if response.status_code >= 400:
+            return run
+        payload = response.json()
+        upstream_status = str(payload.get("status") or "").lower()
+        mapped = _map_gateway_progress_event("run." + upstream_status, payload)
+        if mapped:
+            _append_run_event(run_id, *mapped)
+        return _registry_run(run_id, run["owner_id"])
+    except (requests.RequestException, ValueError):
+        return run
+
+
+def _execute_progress_run(run_id):
+    """Run the trusted loopback gateway adapter without exposing it to clients."""
+    with RUN_REGISTRY_LOCK:
+        run = RUN_REGISTRY.get(run_id)
+        if not run:
+            return
+        owner_id = run["owner_id"]
+        conversation_id = run["conversation_id"]
+        user_message = run["user_message"]
+        context = run["conversation_context"]
+    try:
+        upstream_payload = {
+            "model": MODEL_NAME,
+            "input": user_message,
+            "conversation_history": [
+                {"role": item["role"], "content": item["content"]}
+                for item in context
+                if item.get("role") in ("user", "assistant") and isinstance(item.get("content"), str)
+            ],
+        }
+        if conversation_id:
+            upstream_payload["session_id"] = conversation_id
+        create_response = requests.post(
+            f"{HERMES_URL}/v1/runs", headers=_gateway_headers(), json=upstream_payload, timeout=20
+        )
+        if create_response.status_code >= 400:
+            _append_run_event(run_id, "failed", "failed", "Task could not be completed")
+            return
+        created = create_response.json()
+        upstream_run_id = created.get("run_id")
+        if not isinstance(upstream_run_id, str) or not upstream_run_id:
+            _append_run_event(run_id, "failed", "failed", "Task could not be completed")
+            return
+        with RUN_REGISTRY_LOCK:
+            if run_id not in RUN_REGISTRY:
+                return
+            RUN_REGISTRY[run_id]["upstream_run_id"] = upstream_run_id
+            RUN_REGISTRY[run_id]["status"] = "active"
+        _append_run_event(run_id, "completed", "started", "Task started")
+        _append_run_event(run_id, "active", "working", "Working…")
+
+        stream_response = requests.get(
+            f"{HERMES_URL}/v1/runs/{upstream_run_id}/events",
+            headers=_gateway_headers(),
+            stream=True,
+            timeout=(10, 210),
+        )
+        if stream_response.status_code >= 400:
+            _append_run_event(run_id, "failed", "failed", "Task could not be completed")
+            return
+        for event_name, raw_data in _parse_sse_lines(stream_response.iter_lines(decode_unicode=False)):
+            if raw_data == "[DONE]":
+                continue
+            try:
+                mapped = _map_gateway_progress_event(event_name, json.loads(raw_data))
+            except (TypeError, ValueError):
+                mapped = None
+            if mapped:
+                _append_run_event(run_id, *mapped)
+
+        status_response = requests.get(
+            f"{HERMES_URL}/v1/runs/{upstream_run_id}", headers=_gateway_headers(), timeout=20
+        )
+        if status_response.status_code >= 400:
+            _append_run_event(run_id, "failed", "failed", "Task could not be completed")
+            return
+        status_payload = status_response.json()
+        upstream_status = str(status_payload.get("status") or "").lower()
+        terminal_event = _map_gateway_progress_event("run." + upstream_status, status_payload)
+        if upstream_status in ("approval_required", "input_required", "requires_action"):
+            _append_run_event(run_id, *(terminal_event or ("waiting", "approval", "Waiting for your approval")))
+            return
+        if upstream_status != "completed":
+            _append_run_event(run_id, *(terminal_event or ("failed", "failed", "Task could not be completed")))
+            return
+        reply = _extract_run_reply(status_payload)
+        if not reply:
+            _append_run_event(run_id, "failed", "failed", "Task could not be completed")
+            return
+        _append_run_event(run_id, "active", "finalizing", "Preparing final result")
+        try:
+            if owner_id:
+                _record_authenticated_chat(owner_id, user_message, reply)
+                if conversation_id:
+                    _record_conversation_turn(owner_id, conversation_id, user_message, reply)
+        except Exception:
+            _append_run_event(run_id, "failed", "failed", "Task could not be completed")
+            return
+        with RUN_REGISTRY_LOCK:
+            if run_id not in RUN_REGISTRY:
+                return
+            RUN_REGISTRY[run_id]["reply"] = reply
+            RUN_REGISTRY[run_id]["persisted"] = True
+        _append_run_event(run_id, "completed", "complete", "Task complete")
+    except (requests.RequestException, ValueError):
+        _append_run_event(run_id, "failed", "failed", "Task could not be completed")
 
 
 def _record_authenticated_chat(user_id, user_message, bot_reply):
@@ -332,6 +626,111 @@ def health():
             "status": "error",
             "detail": str(exc)
         }), 503
+
+
+@app.route("/chat/runs", methods=["POST"])
+def create_chat_run():
+    """Start an authenticated, owner-scoped live-progress run."""
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    if not HERMES_KEY:
+        return jsonify({"error": "Hermes API server key is not configured"}), 500
+    data = request.get_json(silent=True) or {}
+    user_message = str(data.get("message", "")).strip()
+    requested_conversation_id = data.get("conversation_id")
+    if not user_message:
+        return jsonify({"error": "No message provided"}), 400
+    if _is_sensitive_cookie_like_message(user_message):
+        return jsonify({"error": "This message looks like a browser credential and was not sent or saved."}), 400
+    try:
+        if not _gateway_supports_runs():
+            return jsonify({"error": "Live progress is unavailable."}), 503
+        conversation_id = None
+        context = []
+        if requested_conversation_id:
+            conversation_id = _valid_uuid(requested_conversation_id)
+            if not conversation_id or not _get_owned_conversation(user_id, conversation_id):
+                return jsonify({"error": "Conversation was not found."}), 404
+            context = _get_recent_conversation_context(conversation_id)
+        run_id = _create_progress_run(user_id, conversation_id, user_message, context)
+        threading.Thread(target=_execute_progress_run, args=(run_id,), daemon=True).start()
+        return jsonify({"run_id": run_id, "status": "queued"}), 202
+    except (requests.RequestException, ValueError, RuntimeError):
+        return jsonify({"error": "Live progress is unavailable."}), 503
+
+
+def _run_status_response(run_id, user_id):
+    run = _registry_run(run_id, user_id)
+    if not run:
+        return None
+    _sync_upstream_run_status(run_id)
+    run = _registry_run(run_id, user_id)
+    return {
+        "run_id": run_id,
+        "status": run["status"],
+        "last_sequence": run["sequence"],
+        "result_ready": bool(run["persisted"] and run["reply"]),
+    }
+
+
+@app.route("/chat/progress/<run_id>", methods=["GET"])
+def stream_chat_progress(run_id):
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    if not _registry_run(run_id, user_id):
+        return jsonify({"error": "Run was not found."}), 404
+
+    def generate():
+        sent_sequence = 0
+        idle_ticks = 0
+        while idle_ticks < 240:
+            run = _registry_run(run_id, user_id)
+            if not run:
+                return
+            pending = [event for event in run["events"] if event["sequence"] > sent_sequence]
+            for event in pending:
+                sent_sequence = event["sequence"]
+                yield "event: progress\ndata: " + json.dumps(event, separators=(",", ":")) + "\n\n"
+                if (
+                    (event["state"] in ("completed", "failed") and event["kind"] in ("complete", "failed"))
+                    or (event["state"] == "waiting" and event["kind"] == "approval")
+                ):
+                    return
+            yield ": keep-alive\n\n"
+            time.sleep(1)
+            idle_ticks += 1
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.route("/chat/runs/<run_id>", methods=["GET"])
+def get_chat_run_status(run_id):
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    status = _run_status_response(run_id, user_id)
+    if not status:
+        return jsonify({"error": "Run was not found."}), 404
+    return jsonify(status), 200
+
+
+@app.route("/chat/runs/<run_id>/result", methods=["GET"])
+def get_chat_run_result(run_id):
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    run = _registry_run(run_id, user_id)
+    if not run:
+        return jsonify({"error": "Run was not found."}), 404
+    if run["status"] != "completed" or not run["persisted"] or not run["reply"]:
+        return jsonify({"error": "Run result is not ready."}), 409
+    return jsonify({"reply": run["reply"]}), 200
 
 @app.route("/chat", methods=["POST"])
 def chat():
