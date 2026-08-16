@@ -382,6 +382,16 @@ a:hover { text-decoration: underline; }
 }
 
 .history-overlay.open { opacity: 1; visibility: visible; }
+.confirm-dialog { position: fixed; inset: 0; z-index: 10050; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(0,0,0,.62); opacity: 0; visibility: hidden; pointer-events: none; transition: opacity .18s ease, visibility .18s ease; }
+.confirm-dialog.open { opacity: 1; visibility: visible; pointer-events: auto; }
+.confirm-card { width: min(100%, 360px); padding: 22px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-secondary); color: var(--text-primary); box-shadow: var(--shadow-lg); transform: translateY(8px); transition: transform .18s ease; }
+.confirm-dialog.open .confirm-card { transform: translateY(0); }
+.confirm-title { margin: 0 0 8px; font-size: 17px; font-weight: 700; }
+.confirm-message { margin: 0; color: var(--text-muted); font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.confirm-action { min-height: 40px; padding: 0 15px; border: 1px solid var(--border); border-radius: var(--radius-md); background: transparent; color: var(--text-primary); font: inherit; font-weight: 600; cursor: pointer; }
+.confirm-action:active { transform: scale(.97); }
+.confirm-action--danger { border-color: transparent; background: var(--error); color: #fff; }
 
 .history-drawer {
   position: fixed;
@@ -1611,7 +1621,17 @@ a:hover { text-decoration: underline; }
   </header>
   <div class="history-body" id="historyList" aria-live="polite"></div>
 </aside>
-
+<!-- ============ IN-PAGE CONFIRMATION ============ -->
+<div class="confirm-dialog" id="confirmDialog" aria-hidden="true">
+  <section class="confirm-card" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
+    <h2 class="confirm-title" id="confirmTitle">Confirm action</h2>
+    <p class="confirm-message" id="confirmMessage"></p>
+    <div class="confirm-actions">
+      <button class="confirm-action" id="confirmCancelBtn" type="button">Cancel</button>
+      <button class="confirm-action confirm-action--danger" id="confirmApproveBtn" type="button">Confirm</button>
+    </div>
+  </section>
+</div>
 <!-- ============ TOAST CONTAINER ============ -->
 <div class="toast-container" id="toastContainer"></div>
 
@@ -1691,6 +1711,7 @@ a:hover { text-decoration: underline; }
     userHasScrolledUp: false,
     conversations: [],
     activeConversationId: null,
+    confirmResolve: null,
   };
 
   // ---------- DOM REFERENCES ----------
@@ -1725,6 +1746,11 @@ a:hover { text-decoration: underline; }
     closeHistoryBtn: $('#closeHistoryBtn'),
     historyList: $('#historyList'),
     logoutBtn: $('#logoutBtn'),
+    confirmDialog: $('#confirmDialog'),
+    confirmTitle: $('#confirmTitle'),
+    confirmMessage: $('#confirmMessage'),
+    confirmCancelBtn: $('#confirmCancelBtn'),
+    confirmApproveBtn: $('#confirmApproveBtn'),
   };
 
   // ---------- INITIALIZATION ----------
@@ -1820,6 +1846,14 @@ a:hover { text-decoration: underline; }
     elements.closeHistoryBtn.addEventListener('click', closeHistory);
     elements.historyOverlay.addEventListener('click', closeHistory);
     if (elements.logoutBtn) elements.logoutBtn.addEventListener('click', handleLogout);
+    if (elements.confirmCancelBtn) elements.confirmCancelBtn.addEventListener('click', () => resolveConfirmation(false));
+    if (elements.confirmApproveBtn) elements.confirmApproveBtn.addEventListener('click', () => resolveConfirmation(true));
+    if (elements.confirmDialog) elements.confirmDialog.addEventListener('click', (event) => {
+      if (event.target === elements.confirmDialog) resolveConfirmation(false);
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && state.confirmResolve) resolveConfirmation(false);
+    });
 
     // Theme
     $$('#themeSelector .theme-option').forEach(btn => {
@@ -1928,16 +1962,43 @@ a:hover { text-decoration: underline; }
     document.body.style.overflow = '';
   }
 
-  function handleLogout() {
+  function resolveConfirmation(approved) {
+    const resolve = state.confirmResolve;
+    state.confirmResolve = null;
+    if (elements.confirmDialog) {
+      elements.confirmDialog.classList.remove('open');
+      elements.confirmDialog.setAttribute('aria-hidden', 'true');
+    }
+    if (resolve) resolve(approved);
+  }
+  function requestConfirmation({ title, message, approveLabel }) {
+    return new Promise((resolve) => {
+      if (!elements.confirmDialog) { resolve(false); return; }
+      if (state.confirmResolve) resolveConfirmation(false);
+      elements.confirmTitle.textContent = title;
+      elements.confirmMessage.textContent = message;
+      elements.confirmApproveBtn.textContent = approveLabel;
+      state.confirmResolve = resolve;
+      elements.confirmDialog.setAttribute('aria-hidden', 'false');
+      elements.confirmDialog.classList.add('open');
+      setTimeout(() => elements.confirmCancelBtn.focus(), 0);
+    });
+  }
+  async function handleLogout() {
     if (!hasAuthenticatedSession()) {
       showToast('You are already signed out.', 'info');
       closeSettings();
       return;
     }
-    if (!window.confirm('Log out from Hermes AI on this device? Your saved conversations will remain available when you sign in again.')) {
+    const confirmed = await requestConfirmation({
+      title: 'Log out from Hermes AI?',
+      message: 'This signs out on this device. Your saved conversations remain available when you sign in again.',
+      approveLabel: 'Log out',
+    });
+    if (!confirmed) {
       return;
     }
-    if (window.authSignOut) window.authSignOut();
+    const signOutTask = window.authSignOut ? window.authSignOut() : null;
     state.activeConversationId = null;
     state.conversations = [];
     state.messages = [];
@@ -1946,6 +2007,7 @@ a:hover { text-decoration: underline; }
     closeSettings();
     renderInitialView();
     showToast('Logged out. Your saved conversations were not deleted.', 'success');
+    if (signOutTask && typeof signOutTask.catch === 'function') signOutTask.catch(() => {});
   }
 
   // ---------- CONVERSATION HISTORY ----------
@@ -2029,7 +2091,12 @@ a:hover { text-decoration: underline; }
 
   async function deleteConversation(conversation) {
     const title = conversation.title || 'this conversation';
-    if (!window.confirm('Delete "' + title + '"? This removes only this saved conversation and its messages.')) {
+    const confirmed = await requestConfirmation({
+      title: 'Delete this conversation?',
+      message: 'Delete "' + title + '" and its messages? Other conversations will not be changed.',
+      approveLabel: 'Delete',
+    });
+    if (!confirmed) {
       return;
     }
     try {
@@ -2042,6 +2109,7 @@ a:hover { text-decoration: underline; }
         renderInitialView();
       }
       renderConversationList();
+      await loadConversations();
       showToast('Conversation deleted.', 'success');
     } catch (error) {
       showToast('Could not delete this conversation. Please try again.', 'error');
@@ -2881,23 +2949,31 @@ a:hover { text-decoration: underline; }
       accountStatus.textContent = name && email && name !== email ? (name + ' · ' + email) : (email || name || 'Signed in');
       accountStatus.title = email || name || 'Signed in';
     }
-    window.authSignOut = async function authSignOut() {
+    window.authSignOut = function authSignOut() {
       var token = authGetToken();
+      authClear();
+      authUpdateUI();
+      if (!token || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
+        return Promise.resolve();
+      }
+      var controller = typeof AbortController === 'function' ? new AbortController() : null;
+      var timeoutId = setTimeout(function() {
+        if (controller) controller.abort();
+      }, 5000);
       try {
-        if (token && SUPABASE_URL && SUPABASE_ANON_KEY) {
-          await fetch(SUPABASE_URL + '/auth/v1/logout', {
-            method: 'POST',
-            headers: {
-              'Authorization': 'Bearer ' + token,
-              'apikey': SUPABASE_ANON_KEY
-            }
-          });
-        }
+        return fetch(SUPABASE_URL + '/auth/v1/logout', {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Bearer ' + token,
+            'apikey': SUPABASE_ANON_KEY
+          },
+          signal: controller ? controller.signal : undefined
+        }).catch(function() {
+          // Local sign-out has already completed; remote revocation is best effort.
+        }).finally(function() { clearTimeout(timeoutId); });
       } catch (ignore) {
-        // Local sign-out must still complete if the revocation request is unavailable.
-      } finally {
-        authClear();
-        authUpdateUI();
+        clearTimeout(timeoutId);
+        return Promise.resolve();
       }
     }
     function showExchangeError(status, data) {
@@ -3241,11 +3317,11 @@ a:hover { text-decoration: underline; }
      returns to the gate can fully reset, and make sure logout re-gates immediately. */
   var origSignOut = window.authSignOut;
   window.authSignOut = function authSignOut() {
-    if (typeof origSignOut === 'function') { origSignOut(); }
     showGate();
     if (typeof window.google !== 'undefined' && window.google.accounts) {
       try { window.google.accounts.id.disableAutoSelect(); } catch (e) {}
     }
+    return typeof origSignOut === 'function' ? origSignOut() : Promise.resolve();
   };
 
   verifyPersisted();

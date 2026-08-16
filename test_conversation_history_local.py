@@ -191,6 +191,22 @@ class LocalArtifactTest(unittest.TestCase):
         self.assertIn("Authorization': 'Bearer ' + token", html)
         self.assertIn("code });", html)
         self.assertNotIn("code: code.trim()", html)
+        self.assertIn('id="confirmDialog"', html)
+        self.assertIn("function requestConfirmation", html)
+        self.assertNotIn("window.confirm(", html)
+        self.assertIn("authClear();\n      authUpdateUI();", html)
+        self.assertIn("return typeof origSignOut === 'function' ? origSignOut() : Promise.resolve();", html)
+
+    def test_frontend_uses_in_page_confirmation_and_refreshes_history_after_delete(self):
+        root = os.path.dirname(os.path.abspath(hermes_app.__file__))
+        with open(os.path.join(root, "frontend", "index.html"), encoding="utf-8") as source:
+            html = source.read()
+        delete_request = "await historyFetch('/conversations/' + encodeURIComponent(conversation.id), { method: 'DELETE' });"
+        self.assertIn(delete_request, html)
+        self.assertIn("await loadConversations();", html)
+        self.assertLess(html.index(delete_request), html.index("await loadConversations();", html.index(delete_request)))
+        self.assertIn("title: 'Delete this conversation?'", html)
+        self.assertIn("title: 'Log out from Hermes AI?'", html)
 
     def test_frontend_uses_active_conversation_id_for_chat_context(self):
         root = os.path.dirname(os.path.abspath(hermes_app.__file__))
