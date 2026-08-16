@@ -2550,7 +2550,7 @@ a:hover { text-decoration: underline; }
       const reply = data.reply || '';
       if (!reply) throw new Error('Empty progress result');
       run.resultReceived = true;
-      state.messages.push({ id: 'msg_' + generateId(8), role: 'ai', content: reply, timestamp: Date.now(), parentId: state.lastUserMessage?.id });
+      state.messages.push({ id: 'msg_' + generateId(8), role: 'ai', content: reply, timestamp: Date.now(), parentId: state.lastUserMessage ? state.lastUserMessage.id : undefined });
       appendMessage(state.messages[state.messages.length - 1]);
       run.terminal = true;
       const key = progressRunStorageKey();
