@@ -178,6 +178,28 @@ config["fallback_providers"] = []
 config["fallback_models"] = []
 
 # ---------------------------------------------------------
+# Privacy boundary for a shared application gateway
+# ---------------------------------------------------------
+# The Render service has one Hermes profile and one API-server process for
+# every Hermes AI user. The built-in `memory` and `session_search`
+# toolsets are persistent at that shared-profile scope, not at the Supabase
+# authenticated-user scope. Leaving either enabled could expose account A
+# profile or session data to account B through model tool calls.
+#
+# Durable Hermes AI context remains application-managed and owner-scoped:
+# `chat_conversations` / `chat_messages` are queried only after the backend
+# validates the caller `Supabase sub`. Do not substitute global Hermes
+# profile memory for that authenticated context.
+agent = config.setdefault("agent", {})
+disabled_toolsets = agent.get("disabled_toolsets", [])
+if not isinstance(disabled_toolsets, list):
+    disabled_toolsets = []
+for toolset_name in ("memory", "session_search"):
+    if toolset_name not in disabled_toolsets:
+        disabled_toolsets.append(toolset_name)
+agent["disabled_toolsets"] = disabled_toolsets
+
+# ---------------------------------------------------------
 # Clean up stale legacy auxiliary keys
 # ---------------------------------------------------------
 for stale_key in ("title_model", "summarizer_model"):
@@ -235,6 +257,10 @@ export API_SERVER_HOST="${API_SERVER_HOST:-127.0.0.1}"
 export API_SERVER_PORT="${API_SERVER_PORT:-8642}"
 export API_SERVER_KEY="${API_SERVER_KEY:?Set API_SERVER_KEY in Render Environment Variables}"
 export API_SERVER_CORS_ORIGINS=""
+# Do not inject the shared Hermes home profile's MEMORY.md / USER.md or other
+# local rules into API-server requests. This is intentionally set before the
+# gateway process starts and complements the toolset-level lock above.
+export HERMES_IGNORE_RULES="true"
 
 # ---------------------------------------------------------
 # 5. Start Hermes Gateway
