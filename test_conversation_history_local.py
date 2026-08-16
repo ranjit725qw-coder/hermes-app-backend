@@ -149,6 +149,26 @@ class ConversationHistoryRoutesTest(unittest.TestCase):
         self.assertEqual(post.call_args.kwargs["json"]["messages"], [{"role": "user", "content": "Anonymous hello"}])
         record_turn.assert_not_called()
 
+    def test_authenticated_cookie_like_message_is_rejected_before_model_or_persistence(self):
+        with patch.object(hermes_app.requests, "post") as post, \
+             patch.object(hermes_app, "get_auth_header_claims", return_value=(self.user_claims, None)), \
+             patch.object(hermes_app, "_record_authenticated_chat") as legacy_record, \
+             patch.object(hermes_app, "_record_conversation_turn") as conversation_record:
+            response = self.client.post("/chat", json={"message": "__Secure-1PSIDTS=credential-like-value"})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("not sent or saved", response.get_json()["error"])
+        post.assert_not_called()
+        legacy_record.assert_not_called()
+        conversation_record.assert_not_called()
+
+    def test_anonymous_cookie_like_text_preserves_anonymous_chat_boundary(self):
+        llm = FakeResponse(200, {"choices": [{"message": {"content": "Anonymous reply"}}]})
+        with patch.object(hermes_app.requests, "post", return_value=llm) as post, \
+             patch.object(hermes_app, "get_auth_header_claims", return_value=(None, None)):
+            response = self.client.post("/chat", json={"message": "__Secure-1PSIDTS=anonymous-text"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(post.call_args.kwargs["json"]["messages"], [{"role": "user", "content": "__Secure-1PSIDTS=anonymous-text"}])
+
 
 class LocalArtifactTest(unittest.TestCase):
     def test_frontend_has_account_and_conversation_controls(self):
@@ -165,6 +185,19 @@ class LocalArtifactTest(unittest.TestCase):
         self.assertIn("method: 'DELETE'", html)
         self.assertIn("overflow-wrap: anywhere", html)
         self.assertIn("min-width: 0", html)
+        self.assertIn("if (response.status === 204) return {};", html)
+        self.assertIn("method: 'POST'", html)
+        self.assertIn("/auth/v1/logout", html)
+        self.assertIn("Authorization': 'Bearer ' + token", html)
+        self.assertIn("code });", html)
+        self.assertNotIn("code: code.trim()", html)
+
+    def test_frontend_uses_active_conversation_id_for_chat_context(self):
+        root = os.path.dirname(os.path.abspath(hermes_app.__file__))
+        with open(os.path.join(root, "frontend", "index.html"), encoding="utf-8") as source:
+            html = source.read()
+        self.assertIn("state.activeConversationId ? { conversation_id: state.activeConversationId }", html)
+        self.assertIn("state.activeConversationId = data.conversation.id", html)
 
     def test_migration_is_additive_and_does_not_modify_legacy_memory(self):
         root = os.path.dirname(os.path.abspath(hermes_app.__file__))

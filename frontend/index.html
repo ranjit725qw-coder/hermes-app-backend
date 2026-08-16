@@ -1961,6 +1961,7 @@ a:hover { text-decoration: underline; }
     const headers = { ...(options.headers || {}) };
     if (window.hermesSendAuthHeaders) window.hermesSendAuthHeaders(headers);
     const response = await fetch(getApiBase() + path, { ...options, headers });
+    if (response.status === 204) return {};
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || 'Conversation history is unavailable.');
     return data;
@@ -2378,7 +2379,8 @@ a:hover { text-decoration: underline; }
     // Store code blocks
     const codeBlocks = [];
     let text = md.replace(/```(\w*)\n?([\s\S]*?)```/g, (match, lang, code) => {
-      codeBlocks.push({ lang: lang || 'text', code: code.trim() });
+      // Preserve persisted/model whitespace; rendering must not mutate message content.
+      codeBlocks.push({ lang: lang || 'text', code });
       return `\x00CODE${codeBlocks.length - 1}\x00`;
     });
 
@@ -2879,9 +2881,24 @@ a:hover { text-decoration: underline; }
       accountStatus.textContent = name && email && name !== email ? (name + ' · ' + email) : (email || name || 'Signed in');
       accountStatus.title = email || name || 'Signed in';
     }
-    window.authSignOut = function authSignOut() {
-      authClear();
-      authUpdateUI();
+    window.authSignOut = async function authSignOut() {
+      var token = authGetToken();
+      try {
+        if (token && SUPABASE_URL && SUPABASE_ANON_KEY) {
+          await fetch(SUPABASE_URL + '/auth/v1/logout', {
+            method: 'POST',
+            headers: {
+              'Authorization': 'Bearer ' + token,
+              'apikey': SUPABASE_ANON_KEY
+            }
+          });
+        }
+      } catch (ignore) {
+        // Local sign-out must still complete if the revocation request is unavailable.
+      } finally {
+        authClear();
+        authUpdateUI();
+      }
     }
     function showExchangeError(status, data) {
       var gateError = document.getElementById('gateError');

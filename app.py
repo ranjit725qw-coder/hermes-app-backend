@@ -148,6 +148,12 @@ def _get_recent_conversation_context(conversation_id, limit=40):
     return list(reversed(rows))
 
 
+def _is_sensitive_cookie_like_message(message):
+    """Reject a narrowly identified cookie-shaped credential prefix prospectively."""
+    normalized = str(message or "").lstrip().lower()
+    return normalized.startswith("__secure-1psidts") or "__secure-1psidts=" in normalized[:256]
+
+
 def _record_conversation_turn(user_id, conversation_id, user_message, bot_reply):
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise RuntimeError("Conversation storage is not configured.")
@@ -346,6 +352,10 @@ def chat():
             return jsonify({"error": "Invalid authentication token.", "detail": auth_err}), 401
         if claims:
             auth_mode = "authenticated"
+            if _is_sensitive_cookie_like_message(user_message):
+                return jsonify({
+                    "error": "This message looks like a browser credential and was not sent or saved."
+                }), 400
             record_uid = claims.get("sub") or claims.get("user_id")
             if requested_conversation_id:
                 conversation_id = _valid_uuid(requested_conversation_id)
