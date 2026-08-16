@@ -98,6 +98,32 @@ class ConversationHistoryRoutesTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(post.call_args.kwargs["json"]["messages"], persisted_turns + [{"role": "user", "content": "Continue from here"}])
 
+    def test_history_restore_query_orders_timestamp_ties_user_before_assistant(self):
+        rows = [
+            {"id": "uuid-a", "role": "user", "content": "Question", "created_at": "2026-08-16T00:00:00+00:00"},
+            {"id": "uuid-z", "role": "assistant", "content": "Answer", "created_at": "2026-08-16T00:00:00+00:00"},
+        ]
+        with patch.object(hermes_app.requests, "get", return_value=FakeResponse(200, rows)) as get:
+            restored = hermes_app._get_conversation_messages(self.conversation_id)
+        self.assertEqual(restored, rows)
+        self.assertEqual(
+            get.call_args.kwargs["params"]["order"],
+            "created_at.asc,role.desc,id.asc",
+        )
+
+    def test_model_context_query_reverses_timestamp_ties_to_user_before_assistant(self):
+        newest_first = [
+            {"id": "uuid-z", "role": "assistant", "content": "Answer", "created_at": "2026-08-16T00:00:00+00:00"},
+            {"id": "uuid-a", "role": "user", "content": "Question", "created_at": "2026-08-16T00:00:00+00:00"},
+        ]
+        with patch.object(hermes_app.requests, "get", return_value=FakeResponse(200, newest_first)) as get:
+            context = hermes_app._get_recent_conversation_context(self.conversation_id)
+        self.assertEqual([row["role"] for row in context], ["user", "assistant"])
+        self.assertEqual(
+            get.call_args.kwargs["params"]["order"],
+            "created_at.desc,role.asc,id.desc",
+        )
+
     def test_unowned_continuation_is_rejected_before_model_call(self):
         with patch.object(hermes_app.requests, "post") as post, \
              patch.object(hermes_app, "get_auth_header_claims", return_value=(self.user_claims, None)), \

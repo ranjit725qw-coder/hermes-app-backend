@@ -119,7 +119,10 @@ def _get_conversation_messages(conversation_id, limit=40):
         params={
             "select": "id,role,content,created_at",
             "conversation_id": f"eq.{conversation_id}",
-            "order": "created_at.asc,id.asc",
+            # A bulk insert gives each request/reply row the same database
+            # timestamp. UUID values are not creation order, so explicitly
+            # place the user request before its assistant reply on a tie.
+            "order": "created_at.asc,role.desc,id.asc",
             "limit": str(limit),
         },
         timeout=20,
@@ -137,7 +140,10 @@ def _get_recent_conversation_context(conversation_id, limit=40):
         params={
             "select": "role,content,created_at,id",
             "conversation_id": f"eq.{conversation_id}",
-            "order": "created_at.desc,id.desc",
+            # Fetch newest-first efficiently, then reverse below. The inverse
+            # role ordering ensures reversal yields user-before-assistant when
+            # a persisted request/reply pair shares created_at.
+            "order": "created_at.desc,role.asc,id.desc",
             "limit": str(limit),
         },
         timeout=20,
