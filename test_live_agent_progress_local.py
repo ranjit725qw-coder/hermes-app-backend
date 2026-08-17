@@ -84,12 +84,11 @@ class LiveAgentProgressTest(unittest.TestCase):
         self.assertIn("Waiting for your approval", body)
         self.assertNotIn("Task complete", body)
 
-    def test_registry_creates_only_backend_safe_task_received_event(self):
+    def test_registry_creates_no_synthetic_activity_before_verified_tool_event(self):
         run_id = hermes_app._create_progress_run(self.owner_a["sub"], None, "private request", [])
         run = hermes_app.RUN_REGISTRY[run_id]
-        self.assertEqual(run["events"][0]["label"], "Task received")
+        self.assertEqual(run["events"], [])
         self.assertNotIn("private request", json.dumps(run["events"]))
-        self.assertEqual(set(run["events"][0]), {"run_id", "sequence", "state", "kind", "label", "occurred_at"})
 
     def test_owner_b_cannot_read_owner_a_status_progress_or_result(self):
         run_id = hermes_app._create_progress_run(self.owner_a["sub"], None, "hello", [])
@@ -156,6 +155,10 @@ class LiveAgentProgressTest(unittest.TestCase):
         self.assertIn("textContent = event.label", html)
         self.assertIn("hermes-auth-cleared", html)
         self.assertIn("PROGRESS_RUN_KEY", html)
+        self.assertIn("if (!run || !run.runId || !run.events.length) return;", html)
+        self.assertIn("agentActivity-' + run.runId", html)
+        self.assertIn("card.dataset.runId = run.runId", html)
+        self.assertNotIn("renderAgentActivity(run);\n    await consumeProgressStream(run);", html)
         self.assertNotIn("innerHTML = event.label", html)
 
     def test_startup_keeps_one_process_with_bounded_threads_for_shared_run_registry(self):

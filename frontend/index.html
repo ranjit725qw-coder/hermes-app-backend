@@ -2415,8 +2415,7 @@ a:hover { text-decoration: underline; }
     const key = progressRunStorageKey();
     if (key) { try { sessionStorage.removeItem(key); } catch (ignore) {} }
     state.activeProgressRun = null;
-    const card = $('#agentActivity');
-    if (card) card.remove();
+    $$('.agent-activity[data-run-id]').forEach((card) => card.remove());
   }
 
   function progressIconFor(event) {
@@ -2427,13 +2426,16 @@ a:hover { text-decoration: underline; }
   }
 
   function renderAgentActivity(run) {
-    let card = $('#agentActivity');
+    if (!run || !run.runId || !run.events.length) return;
+    const cardId = 'agentActivity-' + run.runId;
+    let card = $('#' + cardId);
     if (!card) {
       const emptyState = elements.chatContent.querySelector('.empty-state');
       if (emptyState) elements.chatContent.innerHTML = '';
       card = document.createElement('section');
-      card.id = 'agentActivity';
+      card.id = cardId;
       card.className = 'agent-activity';
+      card.dataset.runId = run.runId;
       card.setAttribute('aria-live', 'polite');
       elements.chatContent.appendChild(card);
     }
@@ -2577,7 +2579,6 @@ a:hover { text-decoration: underline; }
     state.isTyping = false;
     removeTypingIndicator();
     persistActiveProgressRun(run);
-    renderAgentActivity(run);
     await consumeProgressStream(run);
     return true;
   }

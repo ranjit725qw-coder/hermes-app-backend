@@ -152,7 +152,6 @@ def _create_progress_run(owner_id, conversation_id, user_message, conversation_c
             "expires_at": time.time() + RUN_TTL_SECONDS,
             "updated_at": _utc_now(),
         }
-    _append_run_event(run_id, "completed", "received", "Task received")
     return run_id
 
 
@@ -261,8 +260,6 @@ def _execute_progress_run(run_id):
                 return
             RUN_REGISTRY[run_id]["upstream_run_id"] = upstream_run_id
             RUN_REGISTRY[run_id]["status"] = "active"
-        _append_run_event(run_id, "completed", "started", "Task started")
-        _append_run_event(run_id, "active", "working", "Working…")
 
         stream_response = requests.get(
             f"{HERMES_URL}/v1/runs/{upstream_run_id}/events",
@@ -302,7 +299,6 @@ def _execute_progress_run(run_id):
         if not reply:
             _append_run_event(run_id, "failed", "failed", "Task could not be completed")
             return
-        _append_run_event(run_id, "active", "finalizing", "Preparing final result")
         try:
             if owner_id:
                 _record_authenticated_chat(owner_id, user_message, reply)
