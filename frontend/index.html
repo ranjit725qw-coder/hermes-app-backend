@@ -2988,11 +2988,13 @@ a:hover { text-decoration: underline; }
         role: 'ai',
         content: reply,
         timestamp: Date.now(),
-        parentId: state.lastUserMessage?.id,
+        parentId: state.lastUserMessage ? state.lastUserMessage.id : undefined,
       };
 
       state.messages.push(aiMsg);
       appendMessage(aiMsg);
+    } catch (error) {
+      throw error;
     }
   }
 
