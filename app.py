@@ -13,6 +13,12 @@ from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 
 from auth import get_auth_header_claims
+from tool_adapters import BrowserRunnerPendingAdapter
+from tool_approval import ApprovalService
+from tool_events import VerifiedEventGateway
+from tool_executor import ToolExecutor
+from tool_policy import ToolPermissionPolicy
+from tool_registry import default_tool_registry
 
 app = Flask(__name__)
 CORS(app)
@@ -40,6 +46,13 @@ RUN_REGISTRY_LOCK = threading.RLock()
 RUN_TTL_SECONDS = 15 * 60
 RUN_EVENT_LIMIT = 80
 PUBLIC_HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$", re.I)
+
+# Generic Tool Architecture is intentionally local-only at this stage. The
+# registry exposes only the unavailable Browser Runner boundary; it opens no
+# browser, profile, remote connection, account, or third-party site.
+TOOL_REGISTRY = default_tool_registry()
+TOOL_POLICY = ToolPermissionPolicy(TOOL_REGISTRY)
+TOOL_APPROVALS = ApprovalService()
 
 
 def _utc_now():
@@ -104,8 +117,6 @@ def _map_gateway_progress_event(event_name, payload):
         return ("active", "source_review", "Reviewing source: " + hostname if hostname else "Reviewing a public source")
     if any(marker in combined for marker in ("compare", "comparison")):
         return ("active", "comparison", "Comparing findings")
-    if any(marker in combined for marker in ("analysis", "analyse", "analyze", "reasoning")):
-        return ("active", "analysis", "Analysing collected information")
     if any(marker in combined for marker in ("test", "pytest", "vitest", "unittest")):
         return ("active", "tests", "Running tests…")
     if any(marker in combined for marker in ("code", "edit", "write_file", "patch", "build")):
@@ -135,6 +146,26 @@ def _append_run_event(run_id, state, kind, label):
         return event
 
 
+def _append_verified_tool_event(run_id, owner_id, safe_event):
+    """Bridge executor-owned safe facts into an existing owner-scoped run only."""
+    with RUN_REGISTRY_LOCK:
+        run = RUN_REGISTRY.get(run_id)
+        if not run or run.get("owner_id") != owner_id:
+            return None
+        if run.get("status") in ("completed", "failed"):
+            return None
+        return _append_run_event(run_id, safe_event.state, safe_event.kind, safe_event.label)
+
+
+TOOL_EVENT_GATEWAY = VerifiedEventGateway(_append_verified_tool_event)
+TOOL_EXECUTOR = ToolExecutor(
+    policy=TOOL_POLICY,
+    approvals=TOOL_APPROVALS,
+    events=TOOL_EVENT_GATEWAY,
+    adapters={"browser_runner": BrowserRunnerPendingAdapter()},
+)
+
+
 def _create_progress_run(owner_id, conversation_id, user_message, conversation_context):
     run_id = str(uuid.uuid4())
     with RUN_REGISTRY_LOCK:
@@ -153,6 +184,25 @@ def _create_progress_run(owner_id, conversation_id, user_message, conversation_c
             "updated_at": _utc_now(),
         }
     return run_id
+
+
+def _create_tool_run(owner_id, tool_id, command_name, site_id, permitted_artifact_reference=None):
+    """Internal future integration hook; no client route creates arbitrary tools."""
+    run_id = _create_progress_run(owner_id, None, "", [])
+    command = TOOL_EXECUTOR.create_server_command(
+        owner_id=owner_id,
+        run_id=run_id,
+        tool_id=tool_id,
+        command_name=command_name,
+        site_id=site_id,
+        permitted_artifact_reference=permitted_artifact_reference,
+    )
+    with RUN_REGISTRY_LOCK:
+        if run_id not in RUN_REGISTRY:
+            return None, None
+        RUN_REGISTRY[run_id]["tool_command"] = command
+        RUN_REGISTRY[run_id]["tool_approval_submitted"] = False
+    return run_id, TOOL_EXECUTOR.execute(command)
 
 
 def _gateway_headers():
@@ -626,34 +676,20 @@ def health():
 
 @app.route("/chat/runs", methods=["POST"])
 def create_chat_run():
-    """Start an authenticated, owner-scoped live-progress run."""
+    """Refuse public generic chat runs; Activity is reserved for verified tools."""
     user_id, auth_failure = _require_authenticated_user()
     if auth_failure:
         return auth_failure
-    if not HERMES_KEY:
-        return jsonify({"error": "Hermes API server key is not configured"}), 500
     data = request.get_json(silent=True) or {}
     user_message = str(data.get("message", "")).strip()
-    requested_conversation_id = data.get("conversation_id")
     if not user_message:
         return jsonify({"error": "No message provided"}), 400
     if _is_sensitive_cookie_like_message(user_message):
         return jsonify({"error": "This message looks like a browser credential and was not sent or saved."}), 400
-    try:
-        if not _gateway_supports_runs():
-            return jsonify({"error": "Live progress is unavailable."}), 503
-        conversation_id = None
-        context = []
-        if requested_conversation_id:
-            conversation_id = _valid_uuid(requested_conversation_id)
-            if not conversation_id or not _get_owned_conversation(user_id, conversation_id):
-                return jsonify({"error": "Conversation was not found."}), 404
-            context = _get_recent_conversation_context(conversation_id)
-        run_id = _create_progress_run(user_id, conversation_id, user_message, context)
-        threading.Thread(target=_execute_progress_run, args=(run_id,), daemon=True).start()
-        return jsonify({"run_id": run_id, "status": "queued"}), 202
-    except (requests.RequestException, ValueError, RuntimeError):
-        return jsonify({"error": "Live progress is unavailable."}), 503
+    # Normal chat must use /chat. A future server-side tool workflow creates an
+    # owner-bound ToolCommand via _create_tool_run and emits Activity only via
+    # TOOL_EXECUTOR -> TOOL_EVENT_GATEWAY after verified execution facts.
+    return jsonify({"error": "Live Agent Activity is available only for verified tool runs."}), 404
 
 
 def _run_status_response(run_id, user_id):
@@ -727,6 +763,72 @@ def get_chat_run_result(run_id):
     if run["status"] != "completed" or not run["persisted"] or not run["reply"]:
         return jsonify({"error": "Run result is not ready."}), 409
     return jsonify({"reply": run["reply"]}), 200
+
+
+@app.route("/tools", methods=["GET"])
+def list_tools():
+    """Return a safe registry catalog; availability is not a capability grant."""
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    return jsonify({"tools": TOOL_REGISTRY.safe_catalog()}), 200
+
+
+@app.route("/tools/runs/<run_id>/approval", methods=["GET"])
+def get_tool_run_approval(run_id):
+    """Expose only the caller's pending one-time approval metadata."""
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    run = _registry_run(run_id, user_id)
+    if not run or not run.get("tool_command"):
+        return jsonify({"error": "Tool run was not found."}), 404
+    ticket = TOOL_EXECUTOR.approval_for_owner_run(user_id, run_id)
+    if not ticket:
+        return jsonify({"error": "Approval is not available."}), 409
+    return jsonify({
+        "approval_id": ticket.approval_id,
+        "run_id": ticket.run_id,
+        "status": "waiting",
+        "expires_at": ticket.expires_at,
+    }), 200
+
+
+def _resume_tool_run_after_approval(run_id, owner_id, approval_id):
+    """Resume one owner-bound tool run after an authenticated approval submission."""
+    with RUN_REGISTRY_LOCK:
+        run = RUN_REGISTRY.get(run_id)
+        if not run or run.get("owner_id") != owner_id:
+            return
+        command = run.get("tool_command")
+    if command:
+        TOOL_EXECUTOR.resume_after_approval(command, approval_id)
+
+
+@app.route("/tools/runs/<run_id>/approval", methods=["POST"])
+def submit_tool_run_approval(run_id):
+    """Accept a consent decision only for a verified, owner-scoped pending ticket."""
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    data = request.get_json(silent=True) or {}
+    approval_id = str(data.get("approval_id") or "")
+    run = _registry_run(run_id, user_id)
+    if not run or not run.get("tool_command"):
+        return jsonify({"error": "Tool run was not found."}), 404
+    ticket = TOOL_EXECUTOR.approval_for_owner_run(user_id, run_id)
+    if not approval_id or not ticket or ticket.approval_id != approval_id:
+        return jsonify({"error": "Approval is not available."}), 409
+    with RUN_REGISTRY_LOCK:
+        if run.get("tool_approval_submitted"):
+            return jsonify({"error": "Approval is not available."}), 409
+        run["tool_approval_submitted"] = True
+    threading.Thread(
+        target=_resume_tool_run_after_approval,
+        args=(run_id, user_id, approval_id),
+        daemon=True,
+    ).start()
+    return jsonify({"run_id": run_id, "status": "approval_submitted"}), 202
 
 @app.route("/chat", methods=["POST"])
 def chat():

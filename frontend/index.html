@@ -548,7 +548,6 @@ a:hover { text-decoration: underline; }
 
 .message {
   display: flex;
-  gap: var(--space-3);
   max-width: 100%;
   animation: messageIn 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
@@ -565,10 +564,10 @@ a:hover { text-decoration: underline; }
 }
 
 .message.user {
-  flex-direction: row-reverse;
+  justify-content: flex-end;
 }
 
-.message-avatar {
+.typing-avatar {
   width: 32px;
   height: 32px;
   border-radius: var(--radius-md);
@@ -579,14 +578,7 @@ a:hover { text-decoration: underline; }
   font-size: 14px;
   font-weight: 600;
   color: white;
-}
-
-.message.ai .message-avatar {
   background: linear-gradient(135deg, var(--accent) 0%, #3B82F6 100%);
-}
-
-.message.user .message-avatar {
-  background: var(--user-bubble);
 }
 
 .message-content {
@@ -914,6 +906,11 @@ a:hover { text-decoration: underline; }
 .agent-activity-summary { margin: var(--space-3) 0 0 28px; color: var(--text-muted); font-size: 12px; }
 .agent-activity-terminal { margin: var(--space-3) 0 0 28px; color: var(--success); font-size: 13px; font-weight: 700; }
 .agent-activity-interrupted { margin: var(--space-3) 0 0 28px; color: var(--text-muted); font-size: 12px; }
+.agent-activity-approval { display: flex; align-items: center; gap: var(--space-2); margin: var(--space-3) 0 0 28px; }
+.agent-activity-approve { min-height: 36px; padding: 0 13px; border-radius: var(--radius-md); color: #fff; background: var(--accent); font-size: 13px; font-weight: 700; transition: transform var(--transition-fast), background var(--transition-fast); }
+.agent-activity-approve:hover:not(:disabled) { background: var(--accent-hover); }
+.agent-activity-approve:active:not(:disabled) { transform: scale(0.97); }
+.agent-activity-approve:disabled { cursor: not-allowed; opacity: .66; }
 @media (max-width: 600px) { .agent-activity { margin-left: 0; } }
 @media (prefers-reduced-motion: reduce) { .agent-activity { animation: none; } }
 
@@ -2280,17 +2277,6 @@ a:hover { text-decoration: underline; }
     messageEl.className = `message ${msg.role}`;
     messageEl.dataset.messageId = msg.id;
 
-    const avatarHtml = msg.role === 'user' 
-      ? `<div class="message-avatar" aria-hidden="true">U</div>`
-      : `<div class="message-avatar" aria-hidden="true">
-          <svg viewBox="0 0 100 100" width="20" height="20">
-            <g fill="white">
-              <path d="M32 30 L32 70 M32 50 L50 50 M50 30 L50 70" stroke="white" stroke-width="8" stroke-linecap="round" fill="none"/>
-              <circle cx="68" cy="50" r="5"/>
-            </g>
-          </svg>
-        </div>`;
-
     let contentHtml = '';
 
     if (msg.role === 'error') {
@@ -2336,7 +2322,7 @@ a:hover { text-decoration: underline; }
       `;
     }
 
-    messageEl.innerHTML = avatarHtml + contentHtml;
+    messageEl.innerHTML = contentHtml;
 
     // Attach action listeners
     messageEl.querySelectorAll('.action-btn').forEach(btn => {
@@ -2371,7 +2357,7 @@ a:hover { text-decoration: underline; }
     indicator.className = 'typing-indicator';
     indicator.id = 'typingIndicator';
     indicator.innerHTML = `
-      <div class="message-avatar" style="background: linear-gradient(135deg, var(--accent) 0%, #3B82F6 100%);">
+      <div class="typing-avatar" aria-hidden="true">
         <svg viewBox="0 0 100 100" width="20" height="20">
           <g fill="white">
             <path d="M32 30 L32 70 M32 50 L50 50 M50 30 L50 70" stroke="white" stroke-width="8" stroke-linecap="round" fill="none"/>
@@ -2478,6 +2464,18 @@ a:hover { text-decoration: underline; }
       interrupted.textContent = 'Connection interrupted — checking task status';
       card.appendChild(interrupted);
     }
+    if (run.waiting && run.toolApproval && run.toolApproval.status === 'waiting') {
+      const approvalControls = document.createElement('div');
+      approvalControls.className = 'agent-activity-approval';
+      const approveButton = document.createElement('button');
+      approveButton.type = 'button';
+      approveButton.className = 'agent-activity-approve';
+      approveButton.textContent = run.toolApproval.submitting ? 'Submitting approval…' : 'Approve action';
+      approveButton.disabled = Boolean(run.toolApproval.submitting);
+      approveButton.addEventListener('click', () => approveToolRun(run));
+      approvalControls.appendChild(approveButton);
+      card.appendChild(approvalControls);
+    }
     if (run.events.some((event) => event.kind === 'complete' && event.state === 'completed')) {
       const terminal = document.createElement('p');
       terminal.className = 'agent-activity-terminal';
@@ -2494,9 +2492,56 @@ a:hover { text-decoration: underline; }
     run.events.push({ state: event.state, kind: event.kind, label: event.label });
     if (event.kind === 'complete' || event.kind === 'failed') run.terminal = true;
     if (event.state === 'waiting' && event.kind === 'approval') run.waiting = true;
+    if (event.state === 'active' && event.kind === 'approval_received') run.waiting = false;
     persistActiveProgressRun(run);
     renderAgentActivity(run);
+    if (run.waiting && !run.toolApproval && !run.approvalLookupStarted) {
+      run.approvalLookupStarted = true;
+      loadToolApproval(run);
+    }
     return true;
+  }
+
+  async function loadToolApproval(run) {
+    try {
+      const data = await historyFetch('/tools/runs/' + encodeURIComponent(run.runId) + '/approval');
+      if (!run.waiting || !data.approval_id || data.run_id !== run.runId || data.status !== 'waiting') return;
+      run.toolApproval = { approvalId: data.approval_id, status: 'waiting', submitting: false };
+      renderAgentActivity(run);
+    } catch (ignore) {
+      // The backend has not issued a local tool approval for this run.
+    } finally {
+      run.approvalLookupStarted = false;
+    }
+  }
+
+  async function approveToolRun(run) {
+    if (!run || !run.waiting || !run.toolApproval || run.toolApproval.submitting) return;
+    const confirmed = await requestConfirmation({
+      title: 'Approve requested action?',
+      message: 'Hermes will continue only the verified action tied to this task. You can withdraw by choosing Cancel now.',
+      approveLabel: 'Approve action',
+    });
+    if (!confirmed) return;
+    run.toolApproval.submitting = true;
+    renderAgentActivity(run);
+    try {
+      const data = await historyFetch('/tools/runs/' + encodeURIComponent(run.runId) + '/approval', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approval_id: run.toolApproval.approvalId }),
+      });
+      if (!data || data.run_id !== run.runId || data.status !== 'approval_submitted') throw new Error('Approval was not accepted.');
+      run.toolApproval = null;
+      run.waiting = false;
+      run.interrupted = false;
+      renderAgentActivity(run);
+      await consumeProgressStream(run);
+    } catch (error) {
+      if (run.toolApproval) run.toolApproval.submitting = false;
+      renderAgentActivity(run);
+      showToast('Approval could not be submitted. Please try again.', 'error');
+    }
   }
 
   function parseProgressFrame(run, frame) {

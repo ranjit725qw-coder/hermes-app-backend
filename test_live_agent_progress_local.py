@@ -64,6 +64,10 @@ class LiveAgentProgressTest(unittest.TestCase):
         self.assertEqual(mapped, ("active", "web_search", "Searching: example.com"))
         self.assertNotIn("secret", mapped[2].lower())
 
+    def test_generic_model_analysis_and_reasoning_are_not_activity_events(self):
+        self.assertIsNone(hermes_app._map_gateway_progress_event("model.analysis", {"status": "analysis"}))
+        self.assertIsNone(hermes_app._map_gateway_progress_event("model.reasoning", {"phase": "reasoning"}))
+
     def test_waiting_and_failure_labels_require_matching_verified_events(self):
         self.assertEqual(
             hermes_app._map_gateway_progress_event("run.input_required", {}),
@@ -128,19 +132,29 @@ class LiveAgentProgressTest(unittest.TestCase):
             response = self.client.post("/chat/runs", json={"message": "__Secure-1PSIDTS=credential"})
         self.assertEqual(response.status_code, 400)
 
-    def test_authenticated_owned_run_creation_returns_only_opaque_run_id(self):
-        conversation_id = "33333333-3333-3333-3333-333333333333"
-        with patch.object(hermes_app, "get_auth_header_claims", return_value=(self.owner_a, None)), \
-             patch.object(hermes_app, "_gateway_supports_runs", return_value=True), \
-             patch.object(hermes_app, "_get_owned_conversation", return_value={"id": conversation_id}), \
-             patch.object(hermes_app, "_get_recent_conversation_context", return_value=[]), \
-             patch.object(hermes_app.threading, "Thread", FakeThread):
-            response = self.client.post("/chat/runs", json={"message": "Research public sources", "conversation_id": conversation_id})
-        self.assertEqual(response.status_code, 202)
-        data = response.get_json()
-        self.assertEqual(set(data), {"run_id", "status"})
-        self.assertEqual(data["status"], "queued")
-        self.assertEqual(hermes_app.RUN_REGISTRY[data["run_id"]]["owner_id"], self.owner_a["sub"])
+    def test_direct_bengali_and_english_cannot_create_public_activity_runs(self):
+        for message in ("হেলো", "Hello"):
+            hermes_app.RUN_REGISTRY.clear()
+            with patch.object(hermes_app, "get_auth_header_claims", return_value=(self.owner_a, None)), \
+                 patch.object(hermes_app.threading, "Thread") as thread:
+                response = self.client.post("/chat/runs", json={"message": message})
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(hermes_app.RUN_REGISTRY, {})
+            thread.assert_not_called()
+
+    def test_direct_bengali_and_english_normal_chat_return_without_activity_state(self):
+        for message in ("হেলো", "Hello"):
+            hermes_app.RUN_REGISTRY.clear()
+            upstream = FakeResponse(payload={"choices": [{"message": {"content": "Normal reply"}}]})
+            with patch.object(hermes_app, "get_auth_header_claims", return_value=(self.owner_a, None)), \
+                 patch.object(hermes_app.requests, "post", return_value=upstream), \
+                 patch.object(hermes_app, "_record_authenticated_chat"), \
+                 patch.object(hermes_app.threading, "Thread") as thread:
+                response = self.client.post("/chat", json={"message": message})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["reply"], "Normal reply")
+            self.assertEqual(hermes_app.RUN_REGISTRY, {})
+            thread.assert_not_called()
 
     def test_upstream_sse_parser_keeps_event_boundaries_without_payload_rendering(self):
         frames = list(hermes_app._parse_sse_lines(["event: tool.started", "data: {\"tool_name\":\"web_search\"}", ""]))
@@ -160,6 +174,16 @@ class LiveAgentProgressTest(unittest.TestCase):
         self.assertIn("card.dataset.runId = run.runId", html)
         self.assertNotIn("renderAgentActivity(run);\n    await consumeProgressStream(run);", html)
         self.assertNotIn("innerHTML = event.label", html)
+
+    def test_message_rows_omit_user_and_hermes_avatars_but_preserve_header_branding(self):
+        root = os.path.dirname(os.path.abspath(hermes_app.__file__))
+        with open(os.path.join(root, "frontend", "index.html"), encoding="utf-8") as source:
+            html = source.read()
+        self.assertNotIn("const avatarHtml", html)
+        self.assertNotIn("messageEl.innerHTML = avatarHtml + contentHtml", html)
+        self.assertNotIn('class="message-avatar"', html)
+        self.assertIn('class="typing-avatar"', html)
+        self.assertIn('<span class="topbar-title">Hermes AI</span>', html)
 
     def test_startup_keeps_one_process_with_bounded_threads_for_shared_run_registry(self):
         root = os.path.dirname(os.path.abspath(hermes_app.__file__))
