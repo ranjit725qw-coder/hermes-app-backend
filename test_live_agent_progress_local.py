@@ -182,7 +182,11 @@ class LiveAgentProgressTest(unittest.TestCase):
         self.assertNotIn("const avatarHtml", html)
         self.assertNotIn("messageEl.innerHTML = avatarHtml + contentHtml", html)
         self.assertNotIn('class="message-avatar"', html)
-        self.assertIn('class="typing-avatar"', html)
+        self.assertNotIn('class="typing-avatar"', html)
+        self.assertIn("indicator.className = 'typing-indicator'", html)
+        self.assertIn('class="typing-bubble"', html)
+        self.assertIn('class="typing-text">Hermes AI is thinking</span>', html)
+        self.assertEqual(html.count('class="typing-dot"'), 3)
         self.assertIn('<span class="topbar-title">Hermes AI</span>', html)
 
     def test_startup_keeps_one_process_with_bounded_threads_for_shared_run_registry(self):

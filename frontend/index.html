@@ -567,20 +567,6 @@ a:hover { text-decoration: underline; }
   justify-content: flex-end;
 }
 
-.typing-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-md);
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  font-weight: 600;
-  color: white;
-  background: linear-gradient(135deg, var(--accent) 0%, #3B82F6 100%);
-}
-
 .message-content {
   display: flex;
   flex-direction: column;
@@ -2357,14 +2343,6 @@ a:hover { text-decoration: underline; }
     indicator.className = 'typing-indicator';
     indicator.id = 'typingIndicator';
     indicator.innerHTML = `
-      <div class="typing-avatar" aria-hidden="true">
-        <svg viewBox="0 0 100 100" width="20" height="20">
-          <g fill="white">
-            <path d="M32 30 L32 70 M32 50 L50 50 M50 30 L50 70" stroke="white" stroke-width="8" stroke-linecap="round" fill="none"/>
-            <circle cx="68" cy="50" r="5"/>
-          </g>
-        </svg>
-      </div>
       <div class="typing-bubble">
         <span class="typing-text">Hermes AI is thinking</span>
         <div class="typing-dots">
