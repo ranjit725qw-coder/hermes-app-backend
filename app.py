@@ -865,6 +865,23 @@ def poll_android_command(device_id):
     return jsonify({"command": command})
 
 
+@app.route("/android/devices/<device_id>/connection-test", methods=["POST"])
+def android_device_connection_test(device_id):
+    """Verify a signed paired-device reachability probe without any automation side effect."""
+    data = request.get_json(silent=True) or {}
+    try:
+        status = ANDROID_DEVICE_BROKER.verify_connection_test(
+            device_id,
+            data.get("request_nonce"),
+            data.get("sequence"),
+            data.get("expires_at"),
+            data.get("signature"),
+        )
+    except AndroidDeviceBrokerError:
+        return _android_automation_failure()
+    return jsonify({"status": status})
+
+
 @app.route("/android/devices/<device_id>/commands/<command_id>/cancel", methods=["POST"])
 def cancel_android_command(device_id, command_id):
     """Permit only the command owner to cancel an undelivered device action."""

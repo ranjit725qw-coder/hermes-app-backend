@@ -110,6 +110,19 @@ def device_poll_payload(device_id, request_nonce, sequence, expires_at) -> bytes
     )
 
 
+def connection_test_payload(device_id, request_nonce, sequence, expires_at) -> bytes:
+    """Canonical identity-only reachability probe with no command or UI data."""
+    return _canonical(
+        {
+            "device_id": device_id,
+            "expires_at": int(expires_at),
+            "request_nonce": request_nonce,
+            "schema": "hermes-android-phase2-connection-test-v1",
+            "sequence": int(sequence),
+        }
+    )
+
+
 class AndroidDeviceBroker:
     """Owner-scoped in-memory registry for local Phase 1 validation only.
 
@@ -397,6 +410,30 @@ class AndroidDeviceBroker:
             device_poll_payload(device_id, request_nonce, sequence, expires_at),
             signature_b64,
         )
+
+    def verify_connection_test(
+        self,
+        device_id: str,
+        request_nonce: str,
+        sequence: int,
+        expires_at: int,
+        signature_b64: str,
+    ) -> str:
+        """Verify only paired-device reachability; never poll or emit an event."""
+        device_id = self._required_id(device_id, "device")
+        request_nonce = self._required_id(request_nonce, "request nonce")
+        now = int(self._now())
+        if not isinstance(expires_at, int) or expires_at <= now or expires_at > now + MAX_IDENTITY_RECEIPT_TTL_SECONDS:
+            raise AndroidDeviceBrokerError("request_expired")
+        self.active_owner_for_device(device_id)
+        self.verify_device_payload(
+            device_id,
+            request_nonce,
+            sequence,
+            connection_test_payload(device_id, request_nonce, sequence, expires_at),
+            signature_b64,
+        )
+        return "paired_companion_reachable"
 
     @staticmethod
     def public_device_view(device: RegisteredDevice) -> Dict[str, object]:

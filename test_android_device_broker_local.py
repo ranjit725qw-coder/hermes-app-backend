@@ -11,6 +11,7 @@ from android_device_broker import (
     AndroidDeviceBroker,
     AndroidDeviceBrokerError,
     PHASE1_IDENTITY_EVENT_CODE,
+    connection_test_payload,
     device_poll_payload,
     identity_receipt_payload,
     registration_payload,
@@ -155,6 +156,44 @@ class AndroidDeviceBrokerTest(unittest.TestCase):
         self.assertEqual(self.owner_a, device.owner_id)
         self.assertEqual([], self.broker.list_devices(self.owner_b))
 
+    def test_connection_test_is_signed_owner_bound_fresh_and_single_use(self):
+        device = self.register()
+        nonce = "connection-test-nonce-a"
+        expiry = self.now + 60
+        signature = _sign(
+            self.private_key,
+            connection_test_payload(device.device_id, nonce, 1, expiry),
+        )
+        self.assertEqual(
+            "paired_companion_reachable",
+            self.broker.verify_connection_test(device.device_id, nonce, 1, expiry, signature),
+        )
+        with self.assertRaises(AndroidDeviceBrokerError):
+            self.broker.verify_connection_test(device.device_id, nonce, 1, expiry, signature)
+        with self.assertRaises(AndroidDeviceBrokerError):
+            self.broker.verify_connection_test(device.device_id, "expired-nonce", 2, self.now, signature)
+
+    def test_connection_test_rejects_revoked_device_and_wrong_signer(self):
+        device = self.register()
+        expiry = self.now + 60
+        with self.assertRaises(AndroidDeviceBrokerError):
+            self.broker.verify_connection_test(
+                device.device_id,
+                "wrong-signer-nonce",
+                1,
+                expiry,
+                _sign(ec.generate_private_key(ec.SECP256R1()), connection_test_payload(device.device_id, "wrong-signer-nonce", 1, expiry)),
+            )
+        self.assertTrue(self.broker.revoke_device(self.owner_a, device.device_id))
+        with self.assertRaises(AndroidDeviceBrokerError):
+            self.broker.verify_connection_test(
+                device.device_id,
+                "revoked-nonce",
+                2,
+                expiry,
+                _sign(self.private_key, connection_test_payload(device.device_id, "revoked-nonce", 2, expiry)),
+            )
+
 
 class AndroidDeviceRoutesTest(unittest.TestCase):
     def setUp(self):
@@ -291,6 +330,58 @@ class AndroidDeviceRoutesTest(unittest.TestCase):
                 "sequence": 2,
                 "expires_at": expiry,
                 "signature": _sign(self.private_key, device_poll_payload(device["device_id"], "device-poll-nonce-b", 2, expiry)),
+            },
+        )
+        self.assertGreaterEqual(blocked.status_code, 400)
+
+    def test_connection_test_route_never_polls_or_creates_activity(self):
+        self.hermes_app.RUN_REGISTRY.clear()
+        device = self.register_route_device()
+        expiry = 1_800_000_060
+        nonce = "route-connection-nonce"
+        response = self.client.post(
+            f"/android/devices/{device['device_id']}/connection-test",
+            json={
+                "request_nonce": nonce,
+                "sequence": 1,
+                "expires_at": expiry,
+                "signature": _sign(
+                    self.private_key,
+                    connection_test_payload(device["device_id"], nonce, 1, expiry),
+                ),
+            },
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"status": "paired_companion_reachable"}, response.get_json())
+        self.assertEqual({}, self.hermes_app.RUN_REGISTRY)
+        self.assertEqual({}, self.hermes_app.ANDROID_AUTOMATION_BROKER._pending)
+
+    def test_connection_test_route_rejects_replay_and_revoked_device(self):
+        device = self.register_route_device()
+        expiry = 1_800_000_060
+        nonce = "route-connection-replay"
+        payload = connection_test_payload(device["device_id"], nonce, 1, expiry)
+        request = {
+            "request_nonce": nonce,
+            "sequence": 1,
+            "expires_at": expiry,
+            "signature": _sign(self.private_key, payload),
+        }
+        self.assertEqual(200, self.client.post(f"/android/devices/{device['device_id']}/connection-test", json=request).status_code)
+        self.assertGreaterEqual(self.client.post(f"/android/devices/{device['device_id']}/connection-test", json=request).status_code, 400)
+        with self.authenticated("owner-a"):
+            self.assertEqual(200, self.client.post(f"/android/devices/{device['device_id']}/revoke").status_code)
+        revoked_nonce = "route-connection-revoked"
+        blocked = self.client.post(
+            f"/android/devices/{device['device_id']}/connection-test",
+            json={
+                "request_nonce": revoked_nonce,
+                "sequence": 2,
+                "expires_at": expiry,
+                "signature": _sign(
+                    self.private_key,
+                    connection_test_payload(device["device_id"], revoked_nonce, 2, expiry),
+                ),
             },
         )
         self.assertGreaterEqual(blocked.status_code, 400)
