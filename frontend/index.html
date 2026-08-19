@@ -2033,6 +2033,20 @@ a:hover { text-decoration: underline; }
     return bridge && typeof bridge.isHermesControlEnabled === 'function' ? bridge : null;
   }
 
+  function renderNativeHermesControlState(enabled) {
+    if (!elements.nativeHermesControlBtn || !elements.nativeHermesControlStatus) return;
+    elements.nativeHermesControlBtn.disabled = false;
+    elements.nativeHermesControlBtn.textContent = enabled ? 'Hermes Control: On' : 'Hermes Control: Off';
+    elements.nativeHermesControlBtn.setAttribute('aria-pressed', String(enabled));
+    elements.nativeHermesControlStatus.textContent = enabled
+      ? 'Local control is on. Pairing and automation policy safeguards remain unchanged.'
+      : 'Local control is off. No companion transport or selector capture is available.';
+  }
+
+  window.onHermesControlStateChanged = function(enabled) {
+    renderNativeHermesControlState(enabled === true);
+  };
+
   function refreshNativeHermesControl() {
     const bridge = nativeCompanionBridge();
     if (!elements.nativeHermesControlBtn || !elements.nativeHermesControlStatus) return;
@@ -2043,13 +2057,7 @@ a:hover { text-decoration: underline; }
       elements.nativeHermesControlStatus.textContent = 'The Android Companion controls work only inside the Hermes Android app.';
       return;
     }
-    const enabled = bridge.isHermesControlEnabled() === true;
-    elements.nativeHermesControlBtn.disabled = false;
-    elements.nativeHermesControlBtn.textContent = enabled ? 'Hermes Control: On' : 'Hermes Control: Off';
-    elements.nativeHermesControlBtn.setAttribute('aria-pressed', String(enabled));
-    elements.nativeHermesControlStatus.textContent = enabled
-      ? 'Local control is on. Pairing and automation policy safeguards remain unchanged.'
-      : 'Local control is off. No companion transport or selector capture is available.';
+    renderNativeHermesControlState(bridge.isHermesControlEnabled() === true);
   }
 
   function toggleNativeHermesControl() {
@@ -2059,7 +2067,6 @@ a:hover { text-decoration: underline; }
       return;
     }
     bridge.setHermesControlEnabled(!(bridge.isHermesControlEnabled() === true));
-    refreshNativeHermesControl();
   }
 
   function invokeNativeCompanionAction(method, unavailableMessage) {
