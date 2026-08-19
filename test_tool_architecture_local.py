@@ -108,14 +108,21 @@ class ToolArchitectureLocalTest(unittest.TestCase):
             permitted_artifact_reference="artifact-safe-id",
         )
 
-    def test_default_registry_is_pending_and_exposes_no_live_browser_capability(self):
-        catalog = default_tool_registry().safe_catalog()
-        self.assertEqual(len(catalog), 1)
-        self.assertEqual(catalog[0]["availability"], "pending_external_runner_availability")
-        self.assertFalse(catalog[0]["enabled"])
-        self.assertNotIn("open_url", catalog[0]["commands"])
-        self.assertNotIn("click_selector", catalog[0]["commands"])
-        self.assertNotIn("evaluate_javascript", catalog[0]["commands"])
+    def test_default_registry_preserves_pending_browser_and_default_denied_android_companion(self):
+        catalog = {item["tool_id"]: item for item in default_tool_registry().safe_catalog()}
+        self.assertEqual(set(catalog), {"android_companion", "browser_runner"})
+        browser = catalog["browser_runner"]
+        self.assertEqual(browser["availability"], "pending_external_runner_availability")
+        self.assertFalse(browser["enabled"])
+        self.assertNotIn("open_url", browser["commands"])
+        self.assertNotIn("click_selector", browser["commands"])
+        self.assertNotIn("evaluate_javascript", browser["commands"])
+        android = catalog["android_companion"]
+        self.assertEqual(android["availability"], "available")
+        self.assertTrue(android["enabled"])
+        self.assertEqual(android["site_ids"], ())
+        self.assertIn("OPEN_APP", android["commands"])
+        self.assertIn("TYPE", android["commands"])
 
     def test_policy_default_denies_unknown_tools_unapproved_owners_commands_and_sites(self):
         unknown = self._command()
@@ -240,7 +247,9 @@ class ToolArchitectureLocalTest(unittest.TestCase):
             self.assertEqual(client.get("/tools").status_code, 401)
         with patch.object(hermes_app, "get_auth_header_claims", return_value=({"sub": self.OWNER_A}, None)):
             payload = client.get("/tools").get_json()
-        self.assertEqual(payload["tools"][0]["availability"], "pending_external_runner_availability")
+        catalog = {item["tool_id"]: item for item in payload["tools"]}
+        self.assertEqual(catalog["browser_runner"]["availability"], "pending_external_runner_availability")
+        self.assertEqual(catalog["android_companion"]["site_ids"], [])
         self.assertNotIn("cookie", str(payload).lower())
         self.assertNotIn("token", str(payload).lower())
 

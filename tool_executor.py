@@ -87,6 +87,37 @@ class ToolExecutor:
         self._emit(command, "approval_received")
         return self._execute_adapter(command)
 
+    def authorize_deferred(self, command: ToolCommand) -> ToolExecutionResult:
+        """Authorize a queued hardware action without emitting Activity before a receipt."""
+        if command.expires_at <= self._clock():
+            return ToolExecutionResult("failed", "command_expired")
+        decision = self._policy.evaluate(command)
+        if not decision.allowed:
+            return ToolExecutionResult("failed", decision.code)
+        if decision.approval_required:
+            ticket = self._approvals.mint(command)
+            return ToolExecutionResult("waiting", "approval_required", ticket.approval_id)
+        return ToolExecutionResult("dispatched", "awaiting_device_receipt")
+
+    def resume_deferred_after_approval(self, command: ToolCommand, approval_id: str) -> ToolExecutionResult:
+        decision = self._policy.evaluate(command)
+        if not decision.allowed or not decision.approval_required:
+            return ToolExecutionResult("failed", "policy_denied")
+        approval = self._approvals.consume(approval_id, command)
+        if not approval.approved:
+            return ToolExecutionResult("failed", approval.code)
+        return ToolExecutionResult("dispatched", "awaiting_device_receipt")
+
+    def accept_verified_deferred_receipt(self, command: ToolCommand, receipt: ToolReceipt, verifier) -> ToolExecutionResult:
+        """The sole receipt-to-Activity bridge for asynchronous hardware runners."""
+        if not self._valid_receipt(verifier, command, receipt):
+            self._emit(command, "receipt_invalid")
+            return ToolExecutionResult("failed", "receipt_invalid")
+        if not self._events.emit(self._issuer, command.run_id, command.owner_id, receipt.safe_event_code):
+            self._emit(command, "receipt_invalid")
+            return ToolExecutionResult("failed", "receipt_invalid")
+        return ToolExecutionResult("completed" if receipt.observed_state == "completed" else "failed", "verified_device_receipt")
+
     def approval_for_owner_run(self, owner_id: str, run_id: str):
         return self._approvals.status_for_owner_run(owner_id, run_id)
 
@@ -120,7 +151,7 @@ class ToolExecutor:
             or receipt.run_id != command.run_id
             or receipt.owner_id != command.owner_id
             or receipt.action_digest != command.action_digest
-            or receipt.observed_state != "completed"
+            or receipt.observed_state not in ("completed", "failed")
             or not receipt.receipt_signature
         ):
             return False

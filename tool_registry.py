@@ -52,6 +52,14 @@ def default_tool_registry() -> ToolRegistry:
         "request_approval": RiskClass.ROUTINE,
         "perform_approved_action": RiskClass.CONSEQUENTIAL,
     }
+    android_commands = {
+        "OPEN_APP": RiskClass.ROUTINE,
+        "OBSERVE": RiskClass.ROUTINE,
+        "TAP": RiskClass.ROUTINE,
+        "SCROLL": RiskClass.ROUTINE,
+        "BACK": RiskClass.ROUTINE,
+        "TYPE": RiskClass.CONSEQUENTIAL,
+    }
     return ToolRegistry(
         (
             ToolDescriptor(
@@ -60,6 +68,14 @@ def default_tool_registry() -> ToolRegistry:
                 enabled=False,
                 availability=ToolAvailability.PENDING_EXTERNAL_RUNNER_AVAILABILITY,
                 commands=browser_commands,
+                allowed_site_ids=(),
+            ),
+            ToolDescriptor(
+                tool_id="android_companion",
+                display_name="Android Companion",
+                enabled=True,
+                availability=ToolAvailability.AVAILABLE,
+                commands=android_commands,
                 allowed_site_ids=(),
             ),
         )

@@ -12,6 +12,8 @@ import requests
 from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 
+from android_device_broker import AndroidDeviceBroker, AndroidDeviceBrokerError
+from android_automation_broker import AndroidAutomationBroker, AndroidAutomationBrokerError
 from auth import get_auth_header_claims
 from tool_adapters import BrowserRunnerPendingAdapter
 from tool_approval import ApprovalService
@@ -53,6 +55,14 @@ PUBLIC_HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9
 TOOL_REGISTRY = default_tool_registry()
 TOOL_POLICY = ToolPermissionPolicy(TOOL_REGISTRY)
 TOOL_APPROVALS = ApprovalService()
+
+# Phase 1 Android companion state is intentionally process-local. It cannot
+# issue Android commands, create tool runs, emit Activity events, collect UI
+# data, or replace a future approved durable device-registry design.
+ANDROID_DEVICE_BROKER = AndroidDeviceBroker()
+# Phase 2 remains default-deny because no package profile is configured here.
+# It can queue only future explicitly allowlisted certificate-bound commands.
+ANDROID_AUTOMATION_BROKER = AndroidAutomationBroker(ANDROID_DEVICE_BROKER)
 
 
 def _utc_now():
@@ -672,6 +682,235 @@ def health():
             "status": "error",
             "detail": str(exc)
         }), 503
+
+
+def _android_pairing_failure(status=400):
+    """Keep pairing failures generic and free of key/signature details."""
+    return jsonify({"error": "Android companion request could not be verified."}), status
+
+
+@app.route("/android/devices/pairing-challenge", methods=["POST"])
+def create_android_pairing_challenge():
+    """Create an owner-bound, short-lived Phase 1 registration challenge only."""
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    try:
+        challenge = ANDROID_DEVICE_BROKER.issue_pairing_challenge(user_id)
+    except AndroidDeviceBrokerError:
+        return _android_pairing_failure()
+    return jsonify(
+        {
+            "pairing_id": challenge.pairing_id,
+            "challenge": challenge.challenge,
+            "expires_at": challenge.expires_at,
+            "phase": "identity_only",
+        }
+    ), 201
+
+
+@app.route("/android/devices/pairing-session", methods=["POST"])
+def create_android_pairing_session():
+    """Display a short-lived, owner-bound pairing code only to the signed-in owner."""
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    try:
+        session = ANDROID_DEVICE_BROKER.create_pairing_session(user_id)
+    except AndroidDeviceBrokerError:
+        return _android_pairing_failure()
+    return jsonify({"pairing_code": session.code, "expires_at": session.expires_at, "phase": "identity_only"}), 201
+
+
+@app.route("/android/devices/pairing-session/claim", methods=["POST"])
+def claim_android_pairing_session():
+    """Redeem one code from the native app without accepting a web credential."""
+    data = request.get_json(silent=True) or {}
+    try:
+        challenge = ANDROID_DEVICE_BROKER.claim_pairing_session(data.get("pairing_code"))
+    except AndroidDeviceBrokerError:
+        return _android_pairing_failure()
+    return jsonify({"pairing_id": challenge.pairing_id, "challenge": challenge.challenge, "expires_at": challenge.expires_at, "phase": "identity_only"})
+
+
+@app.route("/android/devices/register", methods=["POST"])
+def register_android_device():
+    """Register a signed Android public key; no capability or command is granted."""
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    data = request.get_json(silent=True) or {}
+    try:
+        device = ANDROID_DEVICE_BROKER.register_device(
+            user_id,
+            data.get("pairing_id"),
+            data.get("label"),
+            data.get("public_key"),
+            data.get("registration_nonce"),
+            data.get("signature"),
+        )
+    except AndroidDeviceBrokerError:
+        return _android_pairing_failure()
+    return jsonify({"device": ANDROID_DEVICE_BROKER.public_device_view(device), "phase": "identity_only"}), 201
+
+
+@app.route("/android/devices/pairing-register", methods=["POST"])
+def register_claimed_android_device():
+    """Register only a device that already redeemed one owner-issued pairing code."""
+    data = request.get_json(silent=True) or {}
+    try:
+        device = ANDROID_DEVICE_BROKER.register_paired_device(
+            data.get("pairing_id"), data.get("label"), data.get("public_key"),
+            data.get("registration_nonce"), data.get("signature"),
+        )
+    except AndroidDeviceBrokerError:
+        return _android_pairing_failure()
+    return jsonify({"device": ANDROID_DEVICE_BROKER.public_device_view(device), "phase": "identity_only"}), 201
+
+
+@app.route("/android/devices", methods=["GET"])
+def list_android_devices():
+    """Return only the caller's non-sensitive device records."""
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    try:
+        devices = ANDROID_DEVICE_BROKER.list_devices(user_id)
+    except AndroidDeviceBrokerError:
+        return _android_pairing_failure()
+    return jsonify({"devices": devices, "phase": "identity_only"})
+
+
+@app.route("/android/devices/<device_id>/revoke", methods=["POST"])
+def revoke_android_device(device_id):
+    """Owner-scoped revocation; it does not alter chat, history, or tool state."""
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    try:
+        revoked = ANDROID_DEVICE_BROKER.revoke_device(user_id, device_id)
+    except AndroidDeviceBrokerError:
+        return _android_pairing_failure()
+    if not revoked:
+        return jsonify({"error": "Android companion was not found."}), 404
+    return jsonify({"status": "revoked", "phase": "identity_only"})
+
+
+@app.route("/android/devices/<device_id>/identity-receipt", methods=["POST"])
+def verify_android_identity_receipt(device_id):
+    """Verify only a signed no-action identity receipt; it never emits Activity."""
+    data = request.get_json(silent=True) or {}
+    try:
+        ANDROID_DEVICE_BROKER.verify_identity_receipt(
+            device_id,
+            data.get("receipt_nonce"),
+            data.get("sequence"),
+            data.get("expires_at"),
+            data.get("safe_event_code"),
+            data.get("signature"),
+        )
+    except AndroidDeviceBrokerError:
+        return _android_pairing_failure()
+    return jsonify({"status": "identity_verified"})
+
+
+def _android_automation_failure():
+    return jsonify({"error": "Android automation request could not be verified."}), 400
+
+
+@app.route("/android/devices/<device_id>/commands", methods=["POST"])
+def queue_android_command(device_id):
+    """Queue only a policy-authorized, device-bound command; chat cannot call this route."""
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    data = request.get_json(silent=True) or {}
+    action = str(data.get("action") or "").upper()
+    package_id = str(data.get("package_id") or "")
+    try:
+        run_id = _create_progress_run(user_id, None, "", [])
+        command = TOOL_EXECUTOR.create_server_command(
+            owner_id=user_id,
+            run_id=run_id,
+            tool_id="android_companion",
+            command_name=action,
+            site_id=package_id,
+            permitted_artifact_reference=None,
+        )
+        decision = TOOL_EXECUTOR.authorize_deferred(command)
+        if decision.status != "dispatched":
+            return jsonify({"error": "Android command is not authorized.", "code": decision.code}), 403
+        pending = ANDROID_AUTOMATION_BROKER.request_command(
+            user_id, device_id, command, package_id, data.get("certificate_sha256"),
+            action, data.get("selector_id"), data.get("text"),
+        )
+    except (AndroidAutomationBrokerError, AndroidDeviceBrokerError, ValueError):
+        return _android_automation_failure()
+    with RUN_REGISTRY_LOCK:
+        RUN_REGISTRY[run_id]["tool_command"] = command
+    return jsonify({"command_id": pending.command.command_id, "run_id": run_id, "status": "queued"}), 202
+
+
+@app.route("/android/devices/<device_id>/commands/poll", methods=["POST"])
+def poll_android_command(device_id):
+    """Accept a signed device poll and return at most one owner-bound command."""
+    data = request.get_json(silent=True) or {}
+    try:
+        ANDROID_DEVICE_BROKER.verify_device_poll(
+            device_id, data.get("poll_nonce"), data.get("sequence"), data.get("expires_at"), data.get("signature")
+        )
+        command = ANDROID_AUTOMATION_BROKER.next_for_device(device_id)
+    except AndroidDeviceBrokerError:
+        return _android_automation_failure()
+    return jsonify({"command": command})
+
+
+@app.route("/android/devices/<device_id>/commands/<command_id>/cancel", methods=["POST"])
+def cancel_android_command(device_id, command_id):
+    """Permit only the command owner to cancel an undelivered device action."""
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    return jsonify({"status": "cancelled"}) if ANDROID_AUTOMATION_BROKER.cancel(user_id, device_id, command_id) else (jsonify({"error": "Android command was not found."}), 404)
+
+
+def _accept_android_command_receipt(owner_id, device_id, command_id, data):
+    """Accept only a receipt signed by the registered device for its recorded owner."""
+    try:
+        receipt = ANDROID_AUTOMATION_BROKER.verify_device_receipt(
+            owner_id, device_id, command_id, data.get("receipt_nonce"), data.get("sequence"),
+            data.get("expires_at"), data.get("outcome"), data.get("signature"),
+        )
+        with RUN_REGISTRY_LOCK:
+            run = RUN_REGISTRY.get(receipt.run_id)
+            command = run.get("tool_command") if run and run.get("owner_id") == owner_id else None
+        if not command:
+            return _android_automation_failure()
+        result = TOOL_EXECUTOR.accept_verified_deferred_receipt(command, receipt, ANDROID_AUTOMATION_BROKER)
+        if result.code != "verified_device_receipt":
+            return _android_automation_failure()
+    except (AndroidAutomationBrokerError, AndroidDeviceBrokerError, ValueError):
+        return _android_automation_failure()
+    return jsonify({"status": "verified_receipt"})
+
+
+@app.route("/android/devices/<device_id>/commands/<command_id>/receipt", methods=["POST"])
+def submit_android_command_receipt(device_id, command_id):
+    """Owner-authenticated receipt submission retained for signed-in management UI use."""
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    return _accept_android_command_receipt(user_id, device_id, command_id, request.get_json(silent=True) or {})
+
+
+@app.route("/android/devices/<device_id>/commands/<command_id>/device-receipt", methods=["POST"])
+def submit_android_device_command_receipt(device_id, command_id):
+    """Accept a phone receipt only after device-signature, owner, and run binding verification."""
+    try:
+        owner_id = ANDROID_DEVICE_BROKER.active_owner_for_device(device_id)
+    except AndroidDeviceBrokerError:
+        return _android_automation_failure()
+    return _accept_android_command_receipt(owner_id, device_id, command_id, request.get_json(silent=True) or {})
 
 
 @app.route("/chat/runs", methods=["POST"])

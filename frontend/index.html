@@ -1122,6 +1122,29 @@ a:hover { text-decoration: underline; }
 .settings-danger-action:hover { background: var(--error-subtle); border-color: rgba(239, 68, 68, 0.32); }
 .settings-danger-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+.settings-pairing-action {
+  width: 100%;
+  padding: var(--space-3);
+  color: var(--accent);
+  background: var(--accent-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-weight: 600;
+}
+.settings-pairing-action:disabled { opacity: 0.6; cursor: not-allowed; }
+.settings-pairing-code {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  word-break: break-all;
+}
+.settings-pairing-note { margin-top: var(--space-2); color: var(--text-muted); font-size: 12px; line-height: 1.45; }
+
 .settings-section {
   margin-bottom: var(--space-6);
 }
@@ -1609,6 +1632,15 @@ a:hover { text-decoration: underline; }
       </div>
     </div>
 
+    <div class="settings-section" id="androidPairingSection">
+      <div class="settings-section-title">Android Companion</div>
+      <div class="setting-label">Pair this Android device</div>
+      <div class="setting-desc">Generate a one-time code, then enter it in the native Hermes companion control. The code is not a password or account credential.</div>
+      <button class="settings-pairing-action" id="generatePairingCodeBtn" type="button">Generate one-time pairing code</button>
+      <div class="settings-pairing-code" id="pairingCodeValue" hidden aria-live="polite"></div>
+      <div class="settings-pairing-note" id="pairingCodeStatus">Sign in to generate a short-lived code. The companion remains default-deny until a separately reviewed profile is available.</div>
+    </div>
+
     <div class="settings-section">
       <div class="settings-section-title">Account</div>
       <button class="settings-danger-action" id="logoutBtn" type="button">
@@ -1759,6 +1791,9 @@ a:hover { text-decoration: underline; }
     closeHistoryBtn: $('#closeHistoryBtn'),
     historyList: $('#historyList'),
     logoutBtn: $('#logoutBtn'),
+    generatePairingCodeBtn: $('#generatePairingCodeBtn'),
+    pairingCodeValue: $('#pairingCodeValue'),
+    pairingCodeStatus: $('#pairingCodeStatus'),
     confirmDialog: $('#confirmDialog'),
     confirmTitle: $('#confirmTitle'),
     confirmMessage: $('#confirmMessage'),
@@ -1861,6 +1896,7 @@ a:hover { text-decoration: underline; }
     elements.closeHistoryBtn.addEventListener('click', closeHistory);
     elements.historyOverlay.addEventListener('click', closeHistory);
     if (elements.logoutBtn) elements.logoutBtn.addEventListener('click', handleLogout);
+    if (elements.generatePairingCodeBtn) elements.generatePairingCodeBtn.addEventListener('click', generateAndroidPairingCode);
     if (elements.confirmCancelBtn) elements.confirmCancelBtn.addEventListener('click', () => resolveConfirmation(false));
     if (elements.confirmApproveBtn) elements.confirmApproveBtn.addEventListener('click', () => resolveConfirmation(true));
     if (elements.confirmDialog) elements.confirmDialog.addEventListener('click', (event) => {
@@ -1975,6 +2011,42 @@ a:hover { text-decoration: underline; }
     elements.settingsDrawer.classList.remove('open');
     elements.settingsOverlay.classList.remove('open');
     document.body.style.overflow = '';
+    clearAndroidPairingCode();
+  }
+
+  function clearAndroidPairingCode() {
+    if (!elements.pairingCodeValue || !elements.pairingCodeStatus) return;
+    elements.pairingCodeValue.textContent = '';
+    elements.pairingCodeValue.hidden = true;
+    elements.pairingCodeStatus.textContent = hasAuthenticatedSession()
+      ? 'Generate a short-lived code, then enter it only in the native Hermes companion dialog.'
+      : 'Sign in to generate a short-lived code. The companion remains default-deny until a separately reviewed profile is available.';
+  }
+
+  async function generateAndroidPairingCode() {
+    if (!hasAuthenticatedSession()) {
+      showToast('Sign in to generate a pairing code.', 'info');
+      return;
+    }
+    const button = elements.generatePairingCodeBtn;
+    button.disabled = true;
+    button.textContent = 'Generating…';
+    try {
+      const result = await historyFetch('/android/devices/pairing-session', { method: 'POST' });
+      const code = String(result.pairing_code || '').replace(/[^A-Z2-9]/g, '');
+      if (code.length !== 20) throw new Error('Pairing code was unavailable.');
+      elements.pairingCodeValue.textContent = code;
+      elements.pairingCodeValue.hidden = false;
+      const expires = Number(result.expires_at || 0) * 1000;
+      const expiryText = expires > Date.now() ? new Date(expires).toLocaleTimeString() : 'soon';
+      elements.pairingCodeStatus.textContent = 'Enter this code in the native companion before ' + expiryText + '. It can be used once and is not retained here after Settings closes.';
+    } catch (_) {
+      clearAndroidPairingCode();
+      showToast('A pairing code could not be generated. Please try again.', 'error');
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Generate one-time pairing code';
+    }
   }
 
   function resolveConfirmation(approved) {

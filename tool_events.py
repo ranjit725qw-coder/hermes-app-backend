@@ -25,6 +25,8 @@ _SAFE_EVENT_MAP: Dict[str, SafeToolEvent] = {
     "runner_unavailable": SafeToolEvent("failed", "failed", "The requested tool is not available"),
     "receipt_invalid": SafeToolEvent("failed", "failed", "Tool execution could not be verified"),
     "execution_failed": SafeToolEvent("failed", "failed", "Tool execution could not be completed"),
+    "android_action_verified": SafeToolEvent("completed", "android_action", "Android action completed"),
+    "android_action_failed": SafeToolEvent("failed", "failed", "Android action could not be completed"),
 }
 
 
