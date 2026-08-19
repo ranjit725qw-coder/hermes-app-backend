@@ -1144,6 +1144,8 @@ a:hover { text-decoration: underline; }
   word-break: break-all;
 }
 .settings-pairing-note { margin-top: var(--space-2); color: var(--text-muted); font-size: 12px; line-height: 1.45; }
+.settings-companion-action { margin-top: var(--space-2); }
+.settings-companion-status { margin: var(--space-2) 0 var(--space-3); color: var(--text-muted); font-size: 12px; line-height: 1.45; }
 
 .settings-section {
   margin-bottom: var(--space-6);
@@ -1633,12 +1635,19 @@ a:hover { text-decoration: underline; }
     </div>
 
     <div class="settings-section" id="androidPairingSection">
-      <div class="settings-section-title">Android Companion</div>
-      <div class="setting-label">Pair this Android device</div>
-      <div class="setting-desc">Generate a one-time code, then enter it in the native Hermes companion control. The code is not a password or account credential.</div>
-      <button class="settings-pairing-action" id="generatePairingCodeBtn" type="button">Generate one-time pairing code</button>
+      <div class="settings-section-title">ANDROID COMPANION</div>
+      <div class="setting-label">Hermes Control</div>
+      <div class="setting-desc">Visible local control switch for this paired Android companion. Turning it off stops polling and cancels any pending selector capture.</div>
+      <button class="settings-pairing-action" id="nativeHermesControlBtn" type="button" aria-pressed="false">Hermes Control: Off</button>
+      <div class="settings-companion-status" id="nativeHermesControlStatus">Available in the Hermes Android app.</div>
+      <button class="settings-pairing-action settings-companion-action" id="nativePairDeviceBtn" type="button">Pair This Android Device</button>
+      <div class="setting-desc">Generate a one-time code, then enter it in the secure native pairing dialog. The code is not a password or account credential.</div>
+      <button class="settings-pairing-action settings-companion-action" id="generatePairingCodeBtn" type="button">Generate one-time pairing code</button>
       <div class="settings-pairing-code" id="pairingCodeValue" hidden aria-live="polite"></div>
       <div class="settings-pairing-note" id="pairingCodeStatus">Sign in to generate a short-lived code. The companion remains default-deny until a separately reviewed profile is available.</div>
+      <button class="settings-pairing-action settings-companion-action" id="nativeConnectionTestBtn" type="button">Run Connection Test</button>
+      <button class="settings-pairing-action settings-companion-action" id="nativeAutomationSettingsBtn" type="button">Android Automation Settings</button>
+      <button class="settings-pairing-action settings-companion-action" id="nativeProfileReviewBtn" type="button">Review Settings Profile</button>
     </div>
 
     <div class="settings-section">
@@ -1794,6 +1803,12 @@ a:hover { text-decoration: underline; }
     generatePairingCodeBtn: $('#generatePairingCodeBtn'),
     pairingCodeValue: $('#pairingCodeValue'),
     pairingCodeStatus: $('#pairingCodeStatus'),
+    nativeHermesControlBtn: $('#nativeHermesControlBtn'),
+    nativeHermesControlStatus: $('#nativeHermesControlStatus'),
+    nativePairDeviceBtn: $('#nativePairDeviceBtn'),
+    nativeConnectionTestBtn: $('#nativeConnectionTestBtn'),
+    nativeAutomationSettingsBtn: $('#nativeAutomationSettingsBtn'),
+    nativeProfileReviewBtn: $('#nativeProfileReviewBtn'),
     confirmDialog: $('#confirmDialog'),
     confirmTitle: $('#confirmTitle'),
     confirmMessage: $('#confirmMessage'),
@@ -1897,6 +1912,11 @@ a:hover { text-decoration: underline; }
     elements.historyOverlay.addEventListener('click', closeHistory);
     if (elements.logoutBtn) elements.logoutBtn.addEventListener('click', handleLogout);
     if (elements.generatePairingCodeBtn) elements.generatePairingCodeBtn.addEventListener('click', generateAndroidPairingCode);
+    if (elements.nativeHermesControlBtn) elements.nativeHermesControlBtn.addEventListener('click', toggleNativeHermesControl);
+    if (elements.nativePairDeviceBtn) elements.nativePairDeviceBtn.addEventListener('click', () => invokeNativeCompanionAction('openCompanionPairing', 'Pairing is available in the Hermes Android app.'));
+    if (elements.nativeConnectionTestBtn) elements.nativeConnectionTestBtn.addEventListener('click', () => invokeNativeCompanionAction('runCompanionConnectionTest', 'Connection Test is available in the Hermes Android app.'));
+    if (elements.nativeAutomationSettingsBtn) elements.nativeAutomationSettingsBtn.addEventListener('click', () => invokeNativeCompanionAction('openAndroidAutomationSettings', 'Android Automation Settings are available in the Hermes Android app.'));
+    if (elements.nativeProfileReviewBtn) elements.nativeProfileReviewBtn.addEventListener('click', () => invokeNativeCompanionAction('reviewSettingsProfile', 'Profile Review is available in the Hermes Android app.'));
     if (elements.confirmCancelBtn) elements.confirmCancelBtn.addEventListener('click', () => resolveConfirmation(false));
     if (elements.confirmApproveBtn) elements.confirmApproveBtn.addEventListener('click', () => resolveConfirmation(true));
     if (elements.confirmDialog) elements.confirmDialog.addEventListener('click', (event) => {
@@ -2005,6 +2025,54 @@ a:hover { text-decoration: underline; }
     elements.settingsDrawer.classList.add('open');
     elements.settingsOverlay.classList.add('open');
     document.body.style.overflow = 'hidden';
+    refreshNativeHermesControl();
+  }
+
+  function nativeCompanionBridge() {
+    const bridge = window.AndroidNative;
+    return bridge && typeof bridge.isHermesControlEnabled === 'function' ? bridge : null;
+  }
+
+  function refreshNativeHermesControl() {
+    const bridge = nativeCompanionBridge();
+    if (!elements.nativeHermesControlBtn || !elements.nativeHermesControlStatus) return;
+    if (!bridge) {
+      elements.nativeHermesControlBtn.disabled = true;
+      elements.nativeHermesControlBtn.textContent = 'Hermes Control: Android app required';
+      elements.nativeHermesControlBtn.setAttribute('aria-pressed', 'false');
+      elements.nativeHermesControlStatus.textContent = 'The Android Companion controls work only inside the Hermes Android app.';
+      return;
+    }
+    const enabled = bridge.isHermesControlEnabled() === true;
+    elements.nativeHermesControlBtn.disabled = false;
+    elements.nativeHermesControlBtn.textContent = enabled ? 'Hermes Control: On' : 'Hermes Control: Off';
+    elements.nativeHermesControlBtn.setAttribute('aria-pressed', String(enabled));
+    elements.nativeHermesControlStatus.textContent = enabled
+      ? 'Local control is on. Pairing and automation policy safeguards remain unchanged.'
+      : 'Local control is off. No companion transport or selector capture is available.';
+  }
+
+  function toggleNativeHermesControl() {
+    const bridge = nativeCompanionBridge();
+    if (!bridge || typeof bridge.setHermesControlEnabled !== 'function') {
+      showToast('Hermes Control is available in the Hermes Android app.', 'info');
+      return;
+    }
+    bridge.setHermesControlEnabled(!(bridge.isHermesControlEnabled() === true));
+    refreshNativeHermesControl();
+  }
+
+  function invokeNativeCompanionAction(method, unavailableMessage) {
+    const bridge = nativeCompanionBridge();
+    if (!bridge || typeof bridge[method] !== 'function') {
+      showToast(unavailableMessage, 'info');
+      return;
+    }
+    try {
+      bridge[method]();
+    } catch (_) {
+      showToast('The Android Companion control could not be opened.', 'error');
+    }
   }
 
   function closeSettings() {
