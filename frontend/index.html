@@ -1640,7 +1640,6 @@ a:hover { text-decoration: underline; }
       <div class="setting-desc">Visible local control switch for this paired Android companion. Turning it off stops polling and cancels any pending selector capture.</div>
       <button class="settings-pairing-action" id="nativeHermesControlBtn" type="button" aria-pressed="false">Hermes Control: Off</button>
       <div class="settings-companion-status" id="nativeHermesControlStatus">Available in the Hermes Android app.</div>
-      <div class="settings-companion-status" id="nativeHermesControlDiagnosticStatus" hidden aria-live="polite"></div>
       <button class="settings-pairing-action settings-companion-action" id="nativePairDeviceBtn" type="button">Pair This Android Device</button>
       <div class="setting-desc">Generate a one-time code, then enter it in the secure native pairing dialog. The code is not a password or account credential.</div>
       <button class="settings-pairing-action settings-companion-action" id="generatePairingCodeBtn" type="button">Generate one-time pairing code</button>
@@ -1806,7 +1805,6 @@ a:hover { text-decoration: underline; }
     pairingCodeStatus: $('#pairingCodeStatus'),
     nativeHermesControlBtn: $('#nativeHermesControlBtn'),
     nativeHermesControlStatus: $('#nativeHermesControlStatus'),
-    nativeHermesControlDiagnosticStatus: $('#nativeHermesControlDiagnosticStatus'),
     nativePairDeviceBtn: $('#nativePairDeviceBtn'),
     nativeConnectionTestBtn: $('#nativeConnectionTestBtn'),
     nativeAutomationSettingsBtn: $('#nativeAutomationSettingsBtn'),
@@ -2035,23 +2033,6 @@ a:hover { text-decoration: underline; }
     return bridge && typeof bridge.isHermesControlEnabled === 'function' ? bridge : null;
   }
 
-  function beginNativeHermesControlPreBridgeDiagnostic() {
-    if (!elements.nativeHermesControlDiagnosticStatus) return;
-    elements.nativeHermesControlDiagnosticStatus.hidden = false;
-    elements.nativeHermesControlDiagnosticStatus.textContent =
-      'Hermes Control pre-bridge diagnostic\n1 UI_TAP_REACHED';
-  }
-
-  function recordNativeHermesControlPreBridgeDiagnostic(token) {
-    if (!elements.nativeHermesControlDiagnosticStatus) return;
-    elements.nativeHermesControlDiagnosticStatus.hidden = false;
-    const current = elements.nativeHermesControlDiagnosticStatus.textContent ||
-      'Hermes Control pre-bridge diagnostic';
-    if (!current.includes(token)) {
-      elements.nativeHermesControlDiagnosticStatus.textContent = `${current}\n${token}`;
-    }
-  }
-
   function renderNativeHermesControlState(enabled) {
     if (!elements.nativeHermesControlBtn || !elements.nativeHermesControlStatus) return;
     elements.nativeHermesControlBtn.disabled = false;
@@ -2080,27 +2061,15 @@ a:hover { text-decoration: underline; }
   }
 
   function toggleNativeHermesControl() {
-    beginNativeHermesControlPreBridgeDiagnostic();
-    const rawBridge = window.AndroidNative;
-    if (!rawBridge) {
-      recordNativeHermesControlPreBridgeDiagnostic('2 ANDROID_BRIDGE_MISSING');
-      showToast('Hermes Control is available in the Hermes Android app.', 'info');
-      return;
-    }
-    recordNativeHermesControlPreBridgeDiagnostic('2 ANDROID_BRIDGE_PRESENT');
     const bridge = nativeCompanionBridge();
     if (!bridge) {
-      recordNativeHermesControlPreBridgeDiagnostic('3 NATIVE_GETTER_MISSING');
       showToast('Hermes Control is available in the Hermes Android app.', 'info');
       return;
     }
     if (!bridge || typeof bridge.setHermesControlEnabled !== 'function') {
-      recordNativeHermesControlPreBridgeDiagnostic('3 NATIVE_SETTER_MISSING');
       showToast('Hermes Control is available in the Hermes Android app.', 'info');
       return;
     }
-    recordNativeHermesControlPreBridgeDiagnostic('3 NATIVE_SETTER_PRESENT');
-    recordNativeHermesControlPreBridgeDiagnostic('4 NATIVE_SETTER_CALL_ATTEMPTED');
     bridge.setHermesControlEnabled(!(bridge.isHermesControlEnabled() === true));
   }
 
