@@ -108,7 +108,7 @@ class ToolArchitectureLocalTest(unittest.TestCase):
             permitted_artifact_reference="artifact-safe-id",
         )
 
-    def test_default_registry_preserves_pending_browser_and_default_denied_android_companion(self):
+    def test_default_registry_preserves_pending_browser_and_one_package_one_action_android_companion(self):
         catalog = {item["tool_id"]: item for item in default_tool_registry().safe_catalog()}
         self.assertEqual(set(catalog), {"android_companion", "browser_runner"})
         browser = catalog["browser_runner"]
@@ -120,9 +120,36 @@ class ToolArchitectureLocalTest(unittest.TestCase):
         android = catalog["android_companion"]
         self.assertEqual(android["availability"], "available")
         self.assertTrue(android["enabled"])
-        self.assertEqual(android["site_ids"], ())
-        self.assertIn("OPEN_APP", android["commands"])
-        self.assertIn("TYPE", android["commands"])
+        self.assertEqual(android["site_ids"], ("com.google.android.youtube",))
+        self.assertEqual(android["commands"], ("OPEN_APP",))
+
+    def test_android_companion_allows_only_owner_bound_youtube_open_app(self):
+        registry = default_tool_registry()
+        policy = ToolPermissionPolicy(registry)
+        policy.allow_owner_tool(self.OWNER_A, "android_companion")
+        executor = ToolExecutor(
+            policy=policy,
+            approvals=ApprovalService(clock=self.clock),
+            events=VerifiedEventGateway(RecordingEvents().append),
+            clock=self.clock,
+        )
+        allowed = executor.create_server_command(
+            self.OWNER_A,
+            "youtube-run",
+            "android_companion",
+            "OPEN_APP",
+            "com.google.android.youtube",
+        )
+
+        self.assertEqual(policy.evaluate(allowed).code, "allowed")
+        self.assertEqual(executor.authorize_deferred(allowed).code, "approval_required")
+
+        wrong_owner = allowed.__class__(**{**allowed.__dict__, "owner_id": self.OWNER_B})
+        self.assertEqual(policy.evaluate(wrong_owner).code, "owner_not_allowed")
+        wrong_package = allowed.__class__(**{**allowed.__dict__, "site_id": "com.example.other"})
+        self.assertEqual(policy.evaluate(wrong_package).code, "site_not_allowed")
+        wrong_action = allowed.__class__(**{**allowed.__dict__, "command_name": "OBSERVE"})
+        self.assertEqual(policy.evaluate(wrong_action).code, "command_not_allowed")
 
     def test_policy_default_denies_unknown_tools_unapproved_owners_commands_and_sites(self):
         unknown = self._command()
@@ -249,7 +276,8 @@ class ToolArchitectureLocalTest(unittest.TestCase):
             payload = client.get("/tools").get_json()
         catalog = {item["tool_id"]: item for item in payload["tools"]}
         self.assertEqual(catalog["browser_runner"]["availability"], "pending_external_runner_availability")
-        self.assertEqual(catalog["android_companion"]["site_ids"], [])
+        self.assertEqual(catalog["android_companion"]["site_ids"], ["com.google.android.youtube"])
+        self.assertEqual(catalog["android_companion"]["commands"], ["OPEN_APP"])
         self.assertNotIn("cookie", str(payload).lower())
         self.assertNotIn("token", str(payload).lower())
 

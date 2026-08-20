@@ -56,11 +56,6 @@ def default_tool_registry() -> ToolRegistry:
         # Launching even an approved mobile app is consequential: every request
         # must pass through a fresh server-side approval ticket.
         "OPEN_APP": RiskClass.CONSEQUENTIAL,
-        "OBSERVE": RiskClass.ROUTINE,
-        "TAP": RiskClass.ROUTINE,
-        "SCROLL": RiskClass.ROUTINE,
-        "BACK": RiskClass.ROUTINE,
-        "TYPE": RiskClass.CONSEQUENTIAL,
     }
     return ToolRegistry(
         (
@@ -78,7 +73,9 @@ def default_tool_registry() -> ToolRegistry:
                 enabled=True,
                 availability=ToolAvailability.AVAILABLE,
                 commands=android_commands,
-                allowed_site_ids=(),
+                # The Android Companion remains one-package/one-action only.
+                # Every other package and action is denied by ToolPermissionPolicy.
+                allowed_site_ids=("com.google.android.youtube",),
             ),
         )
     )
