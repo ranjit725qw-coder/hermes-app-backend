@@ -13,7 +13,7 @@ from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 
 from android_device_broker import AndroidDeviceBroker, AndroidDeviceBrokerError
-from android_automation_broker import AndroidAutomationBroker, AndroidAutomationBrokerError
+from android_automation_broker import AndroidAutomationBroker, AndroidAutomationBrokerError, AndroidPackageProfile
 from auth import get_auth_header_claims
 from tool_adapters import BrowserRunnerPendingAdapter
 from tool_approval import ApprovalService
@@ -21,6 +21,13 @@ from tool_events import VerifiedEventGateway
 from tool_executor import ToolExecutor
 from tool_policy import ToolPermissionPolicy
 from tool_registry import default_tool_registry
+from youtube_open_app import (
+    YOUTUBE_LAUNCH_SELECTOR_ID,
+    YOUTUBE_OPEN_ACTION,
+    YOUTUBE_PACKAGE_ID,
+    is_valid_certificate_sha256,
+    is_youtube_open_request,
+)
 
 app = Flask(__name__)
 CORS(app)
@@ -60,9 +67,26 @@ TOOL_APPROVALS = ApprovalService()
 # issue Android commands, create tool runs, emit Activity events, collect UI
 # data, or replace a future approved durable device-registry design.
 ANDROID_DEVICE_BROKER = AndroidDeviceBroker()
-# Phase 2 remains default-deny because no package profile is configured here.
-# It can queue only future explicitly allowlisted certificate-bound commands.
-ANDROID_AUTOMATION_BROKER = AndroidAutomationBroker(ANDROID_DEVICE_BROKER)
+# The YouTube profile is inactive unless a separately reviewed certificate is
+# supplied through server configuration. No certificate is guessed, committed,
+# or accepted from a chat/client request.
+YOUTUBE_CERTIFICATE_SHA256 = os.getenv("YOUTUBE_CERTIFICATE_SHA256", "").strip().lower()
+YOUTUBE_OWNER_IDS = frozenset(
+    owner.strip() for owner in os.getenv("YOUTUBE_AUTOMATION_OWNER_IDS", "").split(",") if owner.strip()
+)
+_youtube_profile = (
+    AndroidPackageProfile(
+        package_id=YOUTUBE_PACKAGE_ID,
+        certificate_sha256=YOUTUBE_CERTIFICATE_SHA256,
+        allowed_actions=frozenset({YOUTUBE_OPEN_ACTION}),
+        selector_ids=frozenset({YOUTUBE_LAUNCH_SELECTOR_ID}),
+    )
+    if is_valid_certificate_sha256(YOUTUBE_CERTIFICATE_SHA256)
+    else None
+)
+ANDROID_AUTOMATION_BROKER = AndroidAutomationBroker(
+    ANDROID_DEVICE_BROKER, profiles=(_youtube_profile,) if _youtube_profile else ()
+)
 
 
 def _utc_now():
@@ -174,6 +198,8 @@ TOOL_EXECUTOR = ToolExecutor(
     events=TOOL_EVENT_GATEWAY,
     adapters={"browser_runner": BrowserRunnerPendingAdapter()},
 )
+for _youtube_owner_id in YOUTUBE_OWNER_IDS:
+    TOOL_POLICY.allow_owner_tool(_youtube_owner_id, "android_companion")
 
 
 def _create_progress_run(owner_id, conversation_id, user_message, conversation_context):
@@ -213,6 +239,73 @@ def _create_tool_run(owner_id, tool_id, command_name, site_id, permitted_artifac
         RUN_REGISTRY[run_id]["tool_command"] = command
         RUN_REGISTRY[run_id]["tool_approval_submitted"] = False
     return run_id, TOOL_EXECUTOR.execute(command)
+
+
+def _create_youtube_open_run(owner_id):
+    """Create an owner-bound launch offer without queuing or emitting Activity."""
+    if owner_id not in YOUTUBE_OWNER_IDS:
+        return None, "owner_not_allowed"
+    if not ANDROID_AUTOMATION_BROKER.profile_for_package(YOUTUBE_PACKAGE_ID):
+        return None, "youtube_profile_not_active"
+    run_id = _create_progress_run(owner_id, None, "", [])
+    command = TOOL_EXECUTOR.create_server_command(
+        owner_id=owner_id,
+        run_id=run_id,
+        tool_id="android_companion",
+        command_name=YOUTUBE_OPEN_ACTION,
+        site_id=YOUTUBE_PACKAGE_ID,
+        permitted_artifact_reference=YOUTUBE_LAUNCH_SELECTOR_ID,
+        ttl_seconds=120,
+    )
+    result = TOOL_EXECUTOR.authorize_deferred(command)
+    if result.code != "approval_required":
+        with RUN_REGISTRY_LOCK:
+            RUN_REGISTRY.pop(run_id, None)
+        return None, "youtube_launch_not_available"
+    with RUN_REGISTRY_LOCK:
+        RUN_REGISTRY[run_id].update({
+            "tool_command": command,
+            "tool_approval_submitted": False,
+            "youtube_open": True,
+            "status": "waiting",
+        })
+    return run_id, None
+
+
+def _queue_approved_youtube_open(owner_id, run_id, approval_id, device_id):
+    """Consume one consent ticket and queue exactly one certificate-bound YouTube launch."""
+    run = _registry_run(run_id, owner_id)
+    if not run or not run.get("youtube_open") or run.get("tool_approval_submitted"):
+        return None, "approval_not_available"
+    command = run.get("tool_command")
+    if not command:
+        return None, "approval_not_available"
+    ticket = TOOL_EXECUTOR.approval_for_owner_run(owner_id, run_id)
+    if not ticket or ticket.approval_id != approval_id:
+        return None, "approval_not_available"
+    profile = ANDROID_AUTOMATION_BROKER.profile_for_package(YOUTUBE_PACKAGE_ID)
+    if not profile:
+        return None, "youtube_profile_not_active"
+    result = TOOL_EXECUTOR.resume_deferred_after_approval(command, approval_id)
+    if result.code != "awaiting_device_receipt":
+        return None, "approval_not_available"
+    try:
+        selected_device_id = str(device_id or "") or ANDROID_DEVICE_BROKER.single_active_device_for_owner(owner_id)
+        pending = ANDROID_AUTOMATION_BROKER.request_command(
+            owner_id=owner_id,
+            device_id=selected_device_id,
+            command=command,
+            package_id=YOUTUBE_PACKAGE_ID,
+            certificate_sha256=profile.certificate_sha256,
+            action=YOUTUBE_OPEN_ACTION,
+            selector_id=YOUTUBE_LAUNCH_SELECTOR_ID,
+        )
+    except AndroidAutomationBrokerError:
+        return None, "device_or_policy_denied"
+    with RUN_REGISTRY_LOCK:
+        run["tool_approval_submitted"] = True
+        run["status"] = "dispatched"
+    return pending.command.command_id, None
 
 
 def _gateway_headers():
@@ -1086,6 +1179,42 @@ def submit_tool_run_approval(run_id):
     ).start()
     return jsonify({"run_id": run_id, "status": "approval_submitted"}), 202
 
+
+@app.route("/youtube/runs/<run_id>/approval", methods=["POST"])
+def submit_youtube_open_approval(run_id):
+    """Queue only a confirmed, owner-bound, certificate-bound YouTube OPEN_APP command."""
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    data = request.get_json(silent=True) or {}
+    command_id, error_code = _queue_approved_youtube_open(
+        user_id,
+        run_id,
+        str(data.get("approval_id") or ""),
+        str(data.get("device_id") or ""),
+    )
+    if error_code:
+        return jsonify({"error": error_code}), 409
+    return jsonify({"run_id": run_id, "command_id": command_id, "status": "awaiting_device_receipt"}), 202
+
+
+@app.route("/youtube/runs/<run_id>", methods=["GET"])
+def youtube_open_status(run_id):
+    user_id, auth_failure = _require_authenticated_user()
+    if auth_failure:
+        return auth_failure
+    run = _registry_run(run_id, user_id)
+    if not run or not run.get("youtube_open"):
+        return jsonify({"error": "YouTube launch was not found."}), 404
+    status = run.get("status")
+    labels = {
+        "waiting": "Waiting for confirmation",
+        "dispatched": "Waiting for verified phone receipt",
+        "completed": "YouTube opened on your phone",
+        "failed": "YouTube could not be opened",
+    }
+    return jsonify({"run_id": run_id, "status": status, "label": labels.get(status, "YouTube launch unavailable")})
+
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json(silent=True) or {}
@@ -1125,6 +1254,26 @@ def chat():
                 conversation_context = _get_recent_conversation_context(conversation_id)
     except (requests.RequestException, ValueError, RuntimeError):
         return jsonify({"error": "Conversation history is temporarily unavailable."}), 503
+
+    # This is intentionally deterministic rather than model-selected. Only an
+    # authenticated, explicit YouTube-open request enters the confirmation path;
+    # every other request preserves the existing direct-chat behavior below.
+    if record_uid and is_youtube_open_request(user_message):
+        run_id, error_code = _create_youtube_open_run(record_uid)
+        if error_code:
+            return jsonify({"reply": "YouTube automation is not active on this account/device." , "youtube_launch": {"status": error_code}}), 200
+        ticket = TOOL_EXECUTOR.approval_for_owner_run(record_uid, run_id)
+        return jsonify({
+            "reply": "I can ask your approved Android Companion to open YouTube. Confirm to continue.",
+            "youtube_launch": {
+                "run_id": run_id,
+                "approval_id": ticket.approval_id if ticket else None,
+                "status": "waiting_confirmation",
+                "package_id": YOUTUBE_PACKAGE_ID,
+                "action": YOUTUBE_OPEN_ACTION,
+            },
+            "auth_mode": auth_mode,
+        }), 202
 
     headers = {
         "Authorization": f"Bearer {HERMES_KEY}",

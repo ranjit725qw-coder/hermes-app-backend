@@ -53,7 +53,9 @@ def default_tool_registry() -> ToolRegistry:
         "perform_approved_action": RiskClass.CONSEQUENTIAL,
     }
     android_commands = {
-        "OPEN_APP": RiskClass.ROUTINE,
+        # Launching even an approved mobile app is consequential: every request
+        # must pass through a fresh server-side approval ticket.
+        "OPEN_APP": RiskClass.CONSEQUENTIAL,
         "OBSERVE": RiskClass.ROUTINE,
         "TAP": RiskClass.ROUTINE,
         "SCROLL": RiskClass.ROUTINE,

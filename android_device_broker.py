@@ -279,6 +279,15 @@ class AndroidDeviceBroker:
                 if device.owner_id == owner_id
             ]
 
+    def single_active_device_for_owner(self, owner_id: str) -> str:
+        """Return exactly one active device for an owner or fail closed on zero/many."""
+        owner_id = self._required_id(owner_id, "owner")
+        with self._lock:
+            active = [device.device_id for device in self._devices.values() if device.owner_id == owner_id and device.revoked_at is None]
+            if len(active) != 1:
+                raise AndroidDeviceBrokerError("single_active_device_required")
+            return active[0]
+
     def revoke_device(self, owner_id: str, device_id: str) -> bool:
         owner_id = self._required_id(owner_id, "owner")
         device_id = self._required_id(device_id, "device")

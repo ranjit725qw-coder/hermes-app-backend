@@ -1648,6 +1648,7 @@ a:hover { text-decoration: underline; }
       <button class="settings-pairing-action settings-companion-action" id="nativeConnectionTestBtn" type="button">Run Connection Test</button>
       <button class="settings-pairing-action settings-companion-action" id="nativeAutomationSettingsBtn" type="button">Android Automation Settings</button>
       <button class="settings-pairing-action settings-companion-action" id="nativeProfileReviewBtn" type="button">Review Settings Profile</button>
+      <button class="settings-pairing-action settings-companion-action" id="nativeYouTubeProfileReviewBtn" type="button">Review YouTube Profile</button>
     </div>
 
     <div class="settings-section">
@@ -1809,6 +1810,7 @@ a:hover { text-decoration: underline; }
     nativeConnectionTestBtn: $('#nativeConnectionTestBtn'),
     nativeAutomationSettingsBtn: $('#nativeAutomationSettingsBtn'),
     nativeProfileReviewBtn: $('#nativeProfileReviewBtn'),
+    nativeYouTubeProfileReviewBtn: $('#nativeYouTubeProfileReviewBtn'),
     confirmDialog: $('#confirmDialog'),
     confirmTitle: $('#confirmTitle'),
     confirmMessage: $('#confirmMessage'),
@@ -1917,6 +1919,7 @@ a:hover { text-decoration: underline; }
     if (elements.nativeConnectionTestBtn) elements.nativeConnectionTestBtn.addEventListener('click', () => invokeNativeCompanionAction('runCompanionConnectionTest', 'Connection Test is available in the Hermes Android app.'));
     if (elements.nativeAutomationSettingsBtn) elements.nativeAutomationSettingsBtn.addEventListener('click', () => invokeNativeCompanionAction('openAndroidAutomationSettings', 'Android Automation Settings are available in the Hermes Android app.'));
     if (elements.nativeProfileReviewBtn) elements.nativeProfileReviewBtn.addEventListener('click', () => invokeNativeCompanionAction('reviewSettingsProfile', 'Profile Review is available in the Hermes Android app.'));
+    if (elements.nativeYouTubeProfileReviewBtn) elements.nativeYouTubeProfileReviewBtn.addEventListener('click', () => invokeNativeCompanionAction('reviewYouTubeProfile', 'YouTube Profile Review is available in the Hermes Android app.'));
     if (elements.confirmCancelBtn) elements.confirmCancelBtn.addEventListener('click', () => resolveConfirmation(false));
     if (elements.confirmApproveBtn) elements.confirmApproveBtn.addEventListener('click', () => resolveConfirmation(true));
     if (elements.confirmDialog) elements.confirmDialog.addEventListener('click', (event) => {
@@ -2150,6 +2153,51 @@ a:hover { text-decoration: underline; }
       setTimeout(() => elements.confirmCancelBtn.focus(), 0);
     });
   }
+
+  async function handleYouTubeLaunchConfirmation(launch) {
+    if (!launch || !launch.run_id || !launch.approval_id) {
+      showToast('YouTube launch was unavailable. No phone command was sent.', 'error');
+      return;
+    }
+    const approved = await requestConfirmation({
+      title: 'Open YouTube on your approved Android phone?',
+      message: 'Hermes will request only com.google.android.youtube to open. No other app or Android action will be sent.',
+      approveLabel: 'Open YouTube',
+    });
+    if (!approved) {
+      showToast('YouTube launch cancelled. No phone command was sent.', 'info');
+      return;
+    }
+    try {
+      const queued = await historyFetch('/youtube/runs/' + encodeURIComponent(launch.run_id) + '/approval', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approval_id: launch.approval_id }),
+      });
+      if (!queued || queued.status !== 'awaiting_device_receipt') throw new Error('The YouTube launch was not accepted.');
+      await pollYouTubeLaunchStatus(launch.run_id);
+    } catch (_) {
+      showToast('YouTube launch was denied before a phone command could be sent.', 'error');
+    }
+  }
+
+  async function pollYouTubeLaunchStatus(runId) {
+    for (let attempt = 0; attempt < 18; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const status = await historyFetch('/youtube/runs/' + encodeURIComponent(runId));
+      if (!status) break;
+      if (status.status === 'completed') {
+        showToast(status.label || 'YouTube opened on your phone.', 'success');
+        return;
+      }
+      if (status.status === 'failed') {
+        showToast(status.label || 'YouTube could not be opened.', 'error');
+        return;
+      }
+    }
+    showToast('Waiting for a verified phone receipt timed out. No success was recorded.', 'info');
+  }
+
   async function handleLogout() {
     if (!hasAuthenticatedSession()) {
       showToast('You are already signed out.', 'info');
@@ -3168,6 +3216,9 @@ a:hover { text-decoration: underline; }
 
       state.messages.push(aiMsg);
       appendMessage(aiMsg);
+      if (data.youtube_launch && data.youtube_launch.status === 'waiting_confirmation') {
+        void handleYouTubeLaunchConfirmation(data.youtube_launch);
+      }
     } catch (error) {
       throw error;
     }
