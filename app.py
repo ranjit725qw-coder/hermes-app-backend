@@ -1215,6 +1215,38 @@ def youtube_open_status(run_id):
     }
     return jsonify({"run_id": run_id, "status": status, "label": labels.get(status, "YouTube launch unavailable")})
 
+_YOUTUBE_CHAT_DIAGNOSTIC_AUTH_MODES = frozenset({"authenticated", "anonymous"})
+_YOUTUBE_CHAT_DIAGNOSTIC_OUTCOMES = frozenset({
+    "invalid_auth_header",
+    "not_authenticated",
+    "missing_record_uid",
+    "owner_not_allowed",
+    "youtube_profile_not_active",
+    "youtube_launch_not_available",
+    "waiting_confirmation",
+})
+
+
+def _log_youtube_chat_diagnostic(auth_mode, adapter_outcome):
+    """Temporary, data-minimizing diagnostic for explicit YouTube requests only.
+
+    The log has exactly two request-derived values: categorical auth mode and a
+    bounded adapter outcome. It must never receive tokens, claims, request text,
+    device identifiers, or response content.
+    """
+    safe_auth_mode = auth_mode if auth_mode in _YOUTUBE_CHAT_DIAGNOSTIC_AUTH_MODES else "anonymous"
+    safe_adapter_outcome = (
+        adapter_outcome
+        if adapter_outcome in _YOUTUBE_CHAT_DIAGNOSTIC_OUTCOMES
+        else "unexpected_adapter_outcome"
+    )
+    app.logger.info(
+        "youtube_chat_diagnostic auth_mode=%s adapter_outcome=%s",
+        safe_auth_mode,
+        safe_adapter_outcome,
+    )
+
+
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json(silent=True) or {}
@@ -1237,6 +1269,8 @@ def chat():
     try:
         claims, auth_err = get_auth_header_claims(request)
         if auth_err:
+            if is_youtube_open_request(user_message):
+                _log_youtube_chat_diagnostic("anonymous", "invalid_auth_header")
             return jsonify({"error": "Invalid authentication token.", "detail": auth_err}), 401
         if claims:
             auth_mode = "authenticated"
@@ -1258,11 +1292,20 @@ def chat():
     # This is intentionally deterministic rather than model-selected. Only an
     # authenticated, explicit YouTube-open request enters the confirmation path;
     # every other request preserves the existing direct-chat behavior below.
-    if record_uid and is_youtube_open_request(user_message):
+    is_youtube_request = is_youtube_open_request(user_message)
+    if is_youtube_request and not record_uid:
+        _log_youtube_chat_diagnostic(
+            auth_mode,
+            "missing_record_uid" if auth_mode == "authenticated" else "not_authenticated",
+        )
+
+    if record_uid and is_youtube_request:
         run_id, error_code = _create_youtube_open_run(record_uid)
         if error_code:
+            _log_youtube_chat_diagnostic(auth_mode, error_code)
             return jsonify({"reply": "YouTube automation is not active on this account/device." , "youtube_launch": {"status": error_code}}), 200
         ticket = TOOL_EXECUTOR.approval_for_owner_run(record_uid, run_id)
+        _log_youtube_chat_diagnostic(auth_mode, "waiting_confirmation")
         return jsonify({
             "reply": "I can ask your approved Android Companion to open YouTube. Confirm to continue.",
             "youtube_launch": {

@@ -1,4 +1,8 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import app as hermes_app
 
 from youtube_open_app import (
     YOUTUBE_LAUNCH_SELECTOR_ID,
@@ -27,3 +31,73 @@ class YouTubeOpenAppIntentTest(unittest.TestCase):
         self.assertTrue(is_valid_certificate_sha256("A" * 64))
         self.assertFalse(is_valid_certificate_sha256("a" * 63))
         self.assertFalse(is_valid_certificate_sha256("g" * 64))
+
+
+class YouTubeChatDiagnosticTest(unittest.TestCase):
+    MESSAGE = "YouTube অ্যাপটি খুলে দাও"
+
+    def setUp(self):
+        self.previous_hermes_key = hermes_app.HERMES_KEY
+        hermes_app.HERMES_KEY = "local-test-hermes-key"
+        self.client = hermes_app.app.test_client()
+
+    def tearDown(self):
+        hermes_app.HERMES_KEY = self.previous_hermes_key
+
+    @staticmethod
+    def _model_reply():
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: {"choices": [{"message": {"content": "Normal reply"}}]},
+        )
+
+    def _assert_safe_diagnostic(self, log_call, auth_mode, adapter_outcome):
+        self.assertEqual(
+            (
+                "youtube_chat_diagnostic auth_mode=%s adapter_outcome=%s",
+                auth_mode,
+                adapter_outcome,
+            ),
+            log_call.args,
+        )
+        logged = str(log_call.args)
+        for prohibited_value in (self.MESSAGE, "Bearer", "Authorization", "local-owner-id", "response", "claim"):
+            self.assertNotIn(prohibited_value, logged)
+
+    def test_anonymous_youtube_request_logs_only_categorical_auth_and_outcome(self):
+        with patch.object(hermes_app, "get_auth_header_claims", return_value=(None, None)), \
+             patch.object(hermes_app.requests, "post", return_value=self._model_reply()), \
+             patch.object(hermes_app.app.logger, "info") as diagnostic_log:
+            response = self.client.post("/chat", json={"message": self.MESSAGE})
+
+        self.assertEqual(200, response.status_code)
+        self._assert_safe_diagnostic(diagnostic_log.call_args, "anonymous", "not_authenticated")
+
+    def test_authenticated_request_without_record_uid_logs_bounded_outcome(self):
+        with patch.object(hermes_app, "get_auth_header_claims", return_value=({"aud": "authenticated"}, None)), \
+             patch.object(hermes_app.requests, "post", return_value=self._model_reply()), \
+             patch.object(hermes_app.app.logger, "info") as diagnostic_log:
+            response = self.client.post("/chat", json={"message": self.MESSAGE})
+
+        self.assertEqual(200, response.status_code)
+        self._assert_safe_diagnostic(diagnostic_log.call_args, "authenticated", "missing_record_uid")
+
+    def test_authenticated_adapter_denial_logs_only_bounded_error_code(self):
+        with patch.object(hermes_app, "get_auth_header_claims", return_value=({"sub": "local-owner-id"}, None)), \
+             patch.object(hermes_app, "_create_youtube_open_run", return_value=(None, "owner_not_allowed")), \
+             patch.object(hermes_app.app.logger, "info") as diagnostic_log:
+            response = self.client.post("/chat", json={"message": self.MESSAGE})
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("owner_not_allowed", response.get_json()["youtube_launch"]["status"])
+        self._assert_safe_diagnostic(diagnostic_log.call_args, "authenticated", "owner_not_allowed")
+
+    def test_diagnostic_normalizes_any_unapproved_value_before_logging(self):
+        with patch.object(hermes_app.app.logger, "info") as diagnostic_log:
+            hermes_app._log_youtube_chat_diagnostic("untrusted-auth-mode", "Bearer private-token")
+
+        self._assert_safe_diagnostic(
+            diagnostic_log.call_args,
+            "anonymous",
+            "unexpected_adapter_outcome",
+        )
