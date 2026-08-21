@@ -1653,6 +1653,14 @@ a:hover { text-decoration: underline; }
 
     <div class="settings-section">
       <div class="settings-section-title">Account</div>
+      <div id="authLifecycleDiagnostic" aria-live="polite">
+        <div class="setting-label">TEMPORARY AUTH DIAGNOSTIC</div>
+        <div class="about-item"><span class="about-label">native_callback_seen</span><span class="about-value" id="authDiagNativeCallback">not_seen</span></div>
+        <div class="about-item"><span class="about-label">exchange_outcome</span><span class="about-value" id="authDiagExchangeOutcome">not_started</span></div>
+        <div class="about-item"><span class="about-label">session_after_exchange</span><span class="about-value" id="authDiagSessionAfterExchange">not_observed</span></div>
+        <div class="about-item"><span class="about-label">persisted_verification</span><span class="about-value" id="authDiagPersistedVerification">not_started</span></div>
+        <div class="about-item"><span class="about-label">chat_header_attached</span><span class="about-value" id="authDiagChatHeader">not_observed</span></div>
+      </div>
       <button class="settings-danger-action" id="logoutBtn" type="button">
         <div class="setting-label">Log out</div>
         <div class="setting-desc">Sign out on this device. Your saved conversations remain available when you sign in again.</div>
@@ -3169,6 +3177,10 @@ a:hover { text-decoration: underline; }
 
       const sendHeaders = { 'Content-Type': 'application/json' };
       hermesSendAuthHeaders(sendHeaders);
+      if (window.hermesAuthLifecycleDiagnosticSet) {
+        window.hermesAuthLifecycleDiagnosticSet('chat_header_attached',
+          Object.prototype.hasOwnProperty.call(sendHeaders, 'Authorization') ? 'true' : 'false');
+      }
       const response = await fetch(CONFIG.API_URL, {
         method: 'POST',
         headers: sendHeaders,
@@ -3392,6 +3404,28 @@ a:hover { text-decoration: underline; }
     var RUNTIME_CONFIG = __HERMES_RUNTIME_CONFIG__;
     var SUPABASE_ANON_KEY = RUNTIME_CONFIG.supabaseAnonKey || '';
     var CLIENT_ID = '131546003267-6njnutgr106kcba8m8cg2u9lco55u448.apps.googleusercontent.com';
+    var AUTH_LIFECYCLE_DIAGNOSTIC_IDS = {
+      native_callback_seen: 'authDiagNativeCallback',
+      exchange_outcome: 'authDiagExchangeOutcome',
+      session_after_exchange: 'authDiagSessionAfterExchange',
+      persisted_verification: 'authDiagPersistedVerification',
+      chat_header_attached: 'authDiagChatHeader'
+    };
+    var AUTH_LIFECYCLE_DIAGNOSTIC_VALUES = {
+      native_callback_seen: ['not_seen', 'seen'],
+      exchange_outcome: ['not_started', 'missing_credential', 'success', 'rejected', 'network_failure'],
+      session_after_exchange: ['not_observed', 'present', 'absent'],
+      persisted_verification: ['not_started', 'authenticated', 'cleared'],
+      chat_header_attached: ['not_observed', 'true', 'false']
+    };
+
+    window.hermesAuthLifecycleDiagnosticSet = function hermesAuthLifecycleDiagnosticSet(field, value) {
+      var elementId = AUTH_LIFECYCLE_DIAGNOSTIC_IDS[field];
+      var allowedValues = AUTH_LIFECYCLE_DIAGNOSTIC_VALUES[field];
+      if (!elementId || !allowedValues || allowedValues.indexOf(value) === -1) { return; }
+      var element = document.getElementById(elementId);
+      if (element) { element.textContent = value; }
+    };
 
     window.authGetToken = function authGetToken() { return localStorage.getItem(AUTH_KEY); }
     window.authGetUser = function authGetUser() {
@@ -3458,7 +3492,12 @@ a:hover { text-decoration: underline; }
       gateError.textContent = 'Exchange failed (HTTP ' + status + '): ' + detail;
     }
     window.authOnCredential = function authOnCredential(credential) {
-      if (!credential) { authClear(); return; }
+      if (!credential) {
+        window.hermesAuthLifecycleDiagnosticSet('exchange_outcome', 'missing_credential');
+        authClear();
+        window.hermesAuthLifecycleDiagnosticSet('session_after_exchange', 'absent');
+        return;
+      }
       fetch(SUPABASE_URL + '/auth/v1/token?grant_type=id_token', {
         method: 'POST',
         headers: {
@@ -3481,14 +3520,20 @@ a:hover { text-decoration: underline; }
             email: u.email || '',
             name: (u.user_metadata && u.user_metadata.full_name) || u.email || ''
           }));
+          window.hermesAuthLifecycleDiagnosticSet('exchange_outcome', 'success');
+          window.hermesAuthLifecycleDiagnosticSet('session_after_exchange', authGetToken() ? 'present' : 'absent');
           authUpdateUI();
         } else {
+          window.hermesAuthLifecycleDiagnosticSet('exchange_outcome', 'rejected');
           authClear();
+          window.hermesAuthLifecycleDiagnosticSet('session_after_exchange', 'absent');
           console.warn('[auth] Supabase token exchange failed:', data.error || data.msg || 'unknown');
           showExchangeError(result.status, data);
         }
       }).catch(function(e) {
+        window.hermesAuthLifecycleDiagnosticSet('exchange_outcome', 'network_failure');
         authClear();
+        window.hermesAuthLifecycleDiagnosticSet('session_after_exchange', 'absent');
         console.warn('[auth] token exchange error:', e);
         showExchangeError(0, null);
       });
@@ -3545,7 +3590,11 @@ a:hover { text-decoration: underline; }
   function verifyPersisted() {
     var tok = (window.authGetToken && window.authGetToken()) || null;
     var user = (window.authGetUser && window.authGetUser()) || null;
-    if (!tok || !user) { showGate(); return; }
+    if (!tok || !user) {
+      window.hermesAuthLifecycleDiagnosticSet && window.hermesAuthLifecycleDiagnosticSet('persisted_verification', 'cleared');
+      showGate();
+      return;
+    }
     var apiBase = (window.hermesConfig && window.hermesConfig.apiBase) || '';
     if (!apiBase) {
       var m = document.querySelector('script[src*="app.js"], script');
@@ -3555,10 +3604,21 @@ a:hover { text-decoration: underline; }
     fetch(apiBase + '/auth/verify', { headers: { 'Authorization': 'Bearer ' + tok } })
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        if (data && data.auth_mode === 'authenticated') { showApp(); }
-        else { window.authClear && window.authClear(); showGate(); }
+        if (data && data.auth_mode === 'authenticated') {
+          window.hermesAuthLifecycleDiagnosticSet && window.hermesAuthLifecycleDiagnosticSet('persisted_verification', 'authenticated');
+          showApp();
+        }
+        else {
+          window.hermesAuthLifecycleDiagnosticSet && window.hermesAuthLifecycleDiagnosticSet('persisted_verification', 'cleared');
+          window.authClear && window.authClear();
+          showGate();
+        }
       })
-      .catch(function () { window.authClear && window.authClear(); showGate(); });
+      .catch(function () {
+        window.hermesAuthLifecycleDiagnosticSet && window.hermesAuthLifecycleDiagnosticSet('persisted_verification', 'cleared');
+        window.authClear && window.authClear();
+        showGate();
+      });
   }
 
   /* Hook the existing auth success path: after authUpdateUI succeeds with a
@@ -3642,6 +3702,7 @@ a:hover { text-decoration: underline; }
      gate-wrapped authUpdateUI() hides the gate. A raw JS bridge call
      argument could be malformed — guard accordingly. */
   window.hermesNativeSignInSucceeded = function hermesNativeSignInSucceeded(token) {
+    window.hermesAuthLifecycleDiagnosticSet && window.hermesAuthLifecycleDiagnosticSet('native_callback_seen', 'seen');
     if (typeof token === 'string' && token.length > 50 && authOnCredential) {
       authOnCredential(token);
     }
