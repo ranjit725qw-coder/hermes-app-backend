@@ -1658,7 +1658,7 @@ a:hover { text-decoration: underline; }
         <div class="about-item"><span class="about-label">native_callback_seen</span><span class="about-value" id="authDiagNativeCallback">not_seen</span></div>
         <div class="about-item"><span class="about-label">exchange_outcome</span><span class="about-value" id="authDiagExchangeOutcome">not_started</span></div>
         <div class="about-item"><span class="about-label">session_after_exchange</span><span class="about-value" id="authDiagSessionAfterExchange">not_observed</span></div>
-        <div class="about-item"><span class="about-label">persisted_verification</span><span class="about-value" id="authDiagPersistedVerification">not_started</span></div>
+        <div class="about-item"><span class="about-label">persisted_verification</span><span class="about-value" id="authDiagPersistedVerification">startup_missing_local_state</span></div>
         <div class="about-item"><span class="about-label">chat_header_attached</span><span class="about-value" id="authDiagChatHeader">not_observed</span></div>
       </div>
       <button class="settings-danger-action" id="logoutBtn" type="button">
@@ -3415,7 +3415,7 @@ a:hover { text-decoration: underline; }
       native_callback_seen: ['not_seen', 'seen'],
       exchange_outcome: ['not_started', 'missing_credential', 'success', 'rejected', 'network_failure'],
       session_after_exchange: ['not_observed', 'present', 'absent'],
-      persisted_verification: ['not_started', 'authenticated', 'cleared'],
+      persisted_verification: ['startup_missing_local_state', 'server_authenticated', 'server_anonymous', 'server_rejected', 'request_failed'],
       chat_header_attached: ['not_observed', 'true', 'false']
     };
 
@@ -3591,7 +3591,7 @@ a:hover { text-decoration: underline; }
     var tok = (window.authGetToken && window.authGetToken()) || null;
     var user = (window.authGetUser && window.authGetUser()) || null;
     if (!tok || !user) {
-      window.hermesAuthLifecycleDiagnosticSet && window.hermesAuthLifecycleDiagnosticSet('persisted_verification', 'cleared');
+      window.hermesAuthLifecycleDiagnosticSet && window.hermesAuthLifecycleDiagnosticSet('persisted_verification', 'startup_missing_local_state');
       showGate();
       return;
     }
@@ -3605,17 +3605,18 @@ a:hover { text-decoration: underline; }
       .then(function (r) { return r.json(); })
       .then(function (data) {
         if (data && data.auth_mode === 'authenticated') {
-          window.hermesAuthLifecycleDiagnosticSet && window.hermesAuthLifecycleDiagnosticSet('persisted_verification', 'authenticated');
+          window.hermesAuthLifecycleDiagnosticSet && window.hermesAuthLifecycleDiagnosticSet('persisted_verification', 'server_authenticated');
           showApp();
         }
         else {
-          window.hermesAuthLifecycleDiagnosticSet && window.hermesAuthLifecycleDiagnosticSet('persisted_verification', 'cleared');
+          window.hermesAuthLifecycleDiagnosticSet && window.hermesAuthLifecycleDiagnosticSet(
+            'persisted_verification', data && data.auth_mode === 'anonymous' ? 'server_anonymous' : 'server_rejected');
           window.authClear && window.authClear();
           showGate();
         }
       })
       .catch(function () {
-        window.hermesAuthLifecycleDiagnosticSet && window.hermesAuthLifecycleDiagnosticSet('persisted_verification', 'cleared');
+        window.hermesAuthLifecycleDiagnosticSet && window.hermesAuthLifecycleDiagnosticSet('persisted_verification', 'request_failed');
         window.authClear && window.authClear();
         showGate();
       });
