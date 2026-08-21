@@ -1240,7 +1240,7 @@ def _log_youtube_chat_diagnostic(auth_mode, adapter_outcome):
         if adapter_outcome in _YOUTUBE_CHAT_DIAGNOSTIC_OUTCOMES
         else "unexpected_adapter_outcome"
     )
-    app.logger.info(
+    app.logger.warning(
         "youtube_chat_diagnostic auth_mode=%s adapter_outcome=%s",
         safe_auth_mode,
         safe_adapter_outcome,

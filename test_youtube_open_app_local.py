@@ -67,7 +67,7 @@ class YouTubeChatDiagnosticTest(unittest.TestCase):
     def test_anonymous_youtube_request_logs_only_categorical_auth_and_outcome(self):
         with patch.object(hermes_app, "get_auth_header_claims", return_value=(None, None)), \
              patch.object(hermes_app.requests, "post", return_value=self._model_reply()), \
-             patch.object(hermes_app.app.logger, "info") as diagnostic_log:
+             patch.object(hermes_app.app.logger, "warning") as diagnostic_log:
             response = self.client.post("/chat", json={"message": self.MESSAGE})
 
         self.assertEqual(200, response.status_code)
@@ -76,7 +76,7 @@ class YouTubeChatDiagnosticTest(unittest.TestCase):
     def test_authenticated_request_without_record_uid_logs_bounded_outcome(self):
         with patch.object(hermes_app, "get_auth_header_claims", return_value=({"aud": "authenticated"}, None)), \
              patch.object(hermes_app.requests, "post", return_value=self._model_reply()), \
-             patch.object(hermes_app.app.logger, "info") as diagnostic_log:
+             patch.object(hermes_app.app.logger, "warning") as diagnostic_log:
             response = self.client.post("/chat", json={"message": self.MESSAGE})
 
         self.assertEqual(200, response.status_code)
@@ -85,7 +85,7 @@ class YouTubeChatDiagnosticTest(unittest.TestCase):
     def test_authenticated_adapter_denial_logs_only_bounded_error_code(self):
         with patch.object(hermes_app, "get_auth_header_claims", return_value=({"sub": "local-owner-id"}, None)), \
              patch.object(hermes_app, "_create_youtube_open_run", return_value=(None, "owner_not_allowed")), \
-             patch.object(hermes_app.app.logger, "info") as diagnostic_log:
+             patch.object(hermes_app.app.logger, "warning") as diagnostic_log:
             response = self.client.post("/chat", json={"message": self.MESSAGE})
 
         self.assertEqual(200, response.status_code)
@@ -93,7 +93,7 @@ class YouTubeChatDiagnosticTest(unittest.TestCase):
         self._assert_safe_diagnostic(diagnostic_log.call_args, "authenticated", "owner_not_allowed")
 
     def test_diagnostic_normalizes_any_unapproved_value_before_logging(self):
-        with patch.object(hermes_app.app.logger, "info") as diagnostic_log:
+        with patch.object(hermes_app.app.logger, "warning") as diagnostic_log:
             hermes_app._log_youtube_chat_diagnostic("untrusted-auth-mode", "Bearer private-token")
 
         self._assert_safe_diagnostic(
