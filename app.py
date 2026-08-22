@@ -311,12 +311,33 @@ def _queue_approved_youtube_open(owner_id, run_id, approval_id, device_id):
             action=YOUTUBE_OPEN_ACTION,
             selector_id=YOUTUBE_LAUNCH_SELECTOR_ID,
         )
-    except AndroidAutomationBrokerError:
+    except AndroidAutomationBrokerError as exc:
+        app.logger.warning(
+            "youtube_pre_dispatch_denied reason=%s",
+            _safe_youtube_pre_dispatch_denial_category(exc),
+        )
         return None, "device_or_policy_denied"
     with RUN_REGISTRY_LOCK:
         run["tool_approval_submitted"] = True
         run["status"] = "dispatched"
     return pending.command.command_id, None
+
+
+def _safe_youtube_pre_dispatch_denial_category(exc: AndroidAutomationBrokerError) -> str:
+    """Normalize internal broker rejections before the private diagnostic log.
+
+    This preserves the generic browser response and never emits an identifier,
+    exception text, credential, or raw request field.
+    """
+    allowed = {
+        "single_active_device_required": "active_device_unavailable",
+        "device_unavailable": "active_device_unavailable",
+        "action_not_allowed": "fixed_policy_rejected",
+        "package_not_allowed": "fixed_policy_rejected",
+        "command_not_bound": "command_binding_rejected",
+        "command_expired": "command_expired",
+    }
+    return allowed.get(str(exc), "pre_dispatch_rejected")
 
 
 def _gateway_headers():

@@ -11,6 +11,7 @@ from youtube_open_app import (
     is_valid_certificate_sha256,
     is_youtube_open_request,
 )
+from android_automation_broker import AndroidAutomationBrokerError
 
 
 class YouTubeOpenAppIntentTest(unittest.TestCase):
@@ -100,4 +101,24 @@ class YouTubeChatDiagnosticTest(unittest.TestCase):
             diagnostic_log.call_args,
             "anonymous",
             "unexpected_adapter_outcome",
+        )
+
+    def test_pre_dispatch_diagnostic_normalizes_fixed_broker_failures(self):
+        self.assertEqual(
+            "active_device_unavailable",
+            hermes_app._safe_youtube_pre_dispatch_denial_category(
+                AndroidAutomationBrokerError("device_unavailable"),
+            ),
+        )
+        self.assertEqual(
+            "fixed_policy_rejected",
+            hermes_app._safe_youtube_pre_dispatch_denial_category(
+                AndroidAutomationBrokerError("package_not_allowed"),
+            ),
+        )
+        self.assertEqual(
+            "pre_dispatch_rejected",
+            hermes_app._safe_youtube_pre_dispatch_denial_category(
+                AndroidAutomationBrokerError("untrusted internal text"),
+            ),
         )
