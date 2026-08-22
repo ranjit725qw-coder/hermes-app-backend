@@ -10,6 +10,7 @@ from android_automation_broker import (
     AndroidAutomationBroker,
     AndroidAutomationBrokerError,
     AndroidPackageProfile,
+    LAUNCH_EXECUTION_SERVICE_UNAVAILABLE,
     LAUNCH_EXECUTION_FOREGROUND_TIMEOUT,
     LAUNCH_EXECUTION_INTENT_UNAVAILABLE,
     LAUNCH_EXECUTION_VERIFIED,
@@ -246,6 +247,35 @@ class AndroidAutomationBrokerTest(unittest.TestCase):
             expiry,
             "android_action_failed",
             LAUNCH_EXECUTION_FOREGROUND_TIMEOUT,
+            signature,
+        )
+        self.assertEqual("android_action_failed", receipt.safe_event_code)
+
+    def test_open_app_service_unavailable_is_signed_and_remains_a_binary_failure(self):
+        pending = self.request("OPEN_APP", "open")
+        self.broker.next_for_device(self.device.device_id)
+        receipt_nonce = "receipt-unavailable"
+        expiry = self.now + 30
+        signature = _sign(
+            self.private_key,
+            android_receipt_payload(
+                pending,
+                receipt_nonce,
+                1,
+                expiry,
+                "android_action_failed",
+                LAUNCH_EXECUTION_SERVICE_UNAVAILABLE,
+            ),
+        )
+        receipt = self.broker.verify_device_receipt(
+            self.owner_a,
+            self.device.device_id,
+            pending.command.command_id,
+            receipt_nonce,
+            1,
+            expiry,
+            "android_action_failed",
+            LAUNCH_EXECUTION_SERVICE_UNAVAILABLE,
             signature,
         )
         self.assertEqual("android_action_failed", receipt.safe_event_code)
