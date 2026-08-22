@@ -13,9 +13,11 @@ from android_device_broker import (
     PHASE1_IDENTITY_EVENT_CODE,
     connection_test_payload,
     device_poll_payload,
+    device_recovery_payload,
     identity_receipt_payload,
     registration_payload,
 )
+from android_device_repository import InMemoryDeviceEnrollmentRepository
 
 
 def _key_material():
@@ -192,6 +194,49 @@ class AndroidDeviceBrokerTest(unittest.TestCase):
                 2,
                 expiry,
                 _sign(self.private_key, connection_test_payload(device.device_id, "revoked-nonce", 2, expiry)),
+            )
+
+    def test_signed_recovery_survives_restart_with_a_shared_durable_registry(self):
+        repository = InMemoryDeviceEnrollmentRepository()
+        self.broker = AndroidDeviceBroker(now=lambda: self.now, repository=repository)
+        device = self.register()
+        restarted = AndroidDeviceBroker(now=lambda: self.now, repository=repository)
+        nonce = "recovery-nonce-a"
+        expiry = self.now + 60
+        signature = _sign(
+            self.private_key,
+            device_recovery_payload(device.device_id, nonce, 1, expiry),
+        )
+
+        recovered = restarted.recover_device(device.device_id, nonce, 1, expiry, signature)
+
+        self.assertEqual(device.device_id, recovered.device_id)
+        self.assertEqual(self.owner_a, recovered.owner_id)
+        with self.assertRaises(AndroidDeviceBrokerError):
+            restarted.recover_device(device.device_id, nonce, 1, expiry, signature)
+
+    def test_recovery_rejects_wrong_signer_and_revoked_device(self):
+        device = self.register()
+        expiry = self.now + 60
+        with self.assertRaises(AndroidDeviceBrokerError):
+            self.broker.recover_device(
+                device.device_id,
+                "wrong-recovery-signer",
+                1,
+                expiry,
+                _sign(
+                    ec.generate_private_key(ec.SECP256R1()),
+                    device_recovery_payload(device.device_id, "wrong-recovery-signer", 1, expiry),
+                ),
+            )
+        self.assertTrue(self.broker.revoke_device(self.owner_a, device.device_id))
+        with self.assertRaises(AndroidDeviceBrokerError):
+            self.broker.recover_device(
+                device.device_id,
+                "revoked-recovery",
+                2,
+                expiry,
+                _sign(self.private_key, device_recovery_payload(device.device_id, "revoked-recovery", 2, expiry)),
             )
 
 
@@ -381,6 +426,47 @@ class AndroidDeviceRoutesTest(unittest.TestCase):
                 "signature": _sign(
                     self.private_key,
                     connection_test_payload(device["device_id"], revoked_nonce, 2, expiry),
+                ),
+            },
+        )
+        self.assertGreaterEqual(blocked.status_code, 400)
+
+    def test_recovery_route_requires_existing_signed_unrevoked_device_and_creates_no_activity(self):
+        self.hermes_app.RUN_REGISTRY.clear()
+        device = self.register_route_device()
+        expiry = 1_800_000_060
+        nonce = "route-recovery-nonce"
+        request = {
+            "recovery_nonce": nonce,
+            "sequence": 1,
+            "expires_at": expiry,
+            "signature": _sign(
+                self.private_key,
+                device_recovery_payload(device["device_id"], nonce, 1, expiry),
+            ),
+        }
+
+        recovered = self.client.post(f"/android/devices/{device['device_id']}/recover", json=request)
+
+        self.assertEqual(200, recovered.status_code)
+        self.assertEqual({"status": "paired_companion_recovered"}, recovered.get_json())
+        self.assertEqual({}, self.hermes_app.RUN_REGISTRY)
+        self.assertGreaterEqual(
+            self.client.post(f"/android/devices/{device['device_id']}/recover", json=request).status_code,
+            400,
+        )
+        with self.authenticated("owner-a"):
+            self.assertEqual(200, self.client.post(f"/android/devices/{device['device_id']}/revoke").status_code)
+        revoked_nonce = "route-recovery-revoked"
+        blocked = self.client.post(
+            f"/android/devices/{device['device_id']}/recover",
+            json={
+                "recovery_nonce": revoked_nonce,
+                "sequence": 2,
+                "expires_at": expiry,
+                "signature": _sign(
+                    self.private_key,
+                    device_recovery_payload(device["device_id"], revoked_nonce, 2, expiry),
                 ),
             },
         )

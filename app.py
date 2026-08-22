@@ -13,6 +13,7 @@ from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 
 from android_device_broker import AndroidDeviceBroker, AndroidDeviceBrokerError
+from android_device_repository import InMemoryDeviceEnrollmentRepository, SupabaseDeviceEnrollmentRepository
 from android_automation_broker import AndroidAutomationBroker, AndroidAutomationBrokerError, AndroidPackageProfile
 from auth import get_auth_header_claims
 from tool_adapters import BrowserRunnerPendingAdapter
@@ -63,10 +64,20 @@ TOOL_REGISTRY = default_tool_registry()
 TOOL_POLICY = ToolPermissionPolicy(TOOL_REGISTRY)
 TOOL_APPROVALS = ApprovalService()
 
-# Phase 1 Android companion state is intentionally process-local. It cannot
-# issue Android commands, create tool runs, emit Activity events, collect UI
-# data, or replace a future approved durable device-registry design.
-ANDROID_DEVICE_BROKER = AndroidDeviceBroker()
+def _android_device_enrollment_repository():
+    """Use the backend-only durable registry whenever its service credential exists.
+
+    The in-memory repository is only the local-development fallback. Production
+    requires the separately reviewed migration before this code is deployed.
+    """
+    if SUPABASE_SERVICE_ROLE_KEY:
+        return SupabaseDeviceEnrollmentRepository(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    return InMemoryDeviceEnrollmentRepository()
+
+
+# Pairing handoffs remain ephemeral. Registered public keys, revocation state,
+# and replay sequences are isolated in the durable device registry instead.
+ANDROID_DEVICE_BROKER = AndroidDeviceBroker(repository=_android_device_enrollment_repository())
 # The YouTube profile is inactive unless a separately reviewed certificate is
 # supplied through server configuration. No certificate is guessed, committed,
 # or accepted from a chat/client request.
@@ -973,6 +984,23 @@ def android_device_connection_test(device_id):
     except AndroidDeviceBrokerError:
         return _android_automation_failure()
     return jsonify({"status": status})
+
+
+@app.route("/android/devices/<device_id>/recover", methods=["POST"])
+def recover_android_device(device_id):
+    """Reconfirm an existing device by its Keystore signature; never pair anew."""
+    data = request.get_json(silent=True) or {}
+    try:
+        ANDROID_DEVICE_BROKER.recover_device(
+            device_id,
+            data.get("recovery_nonce"),
+            data.get("sequence"),
+            data.get("expires_at"),
+            data.get("signature"),
+        )
+    except AndroidDeviceBrokerError:
+        return _android_automation_failure()
+    return jsonify({"status": "paired_companion_recovered"})
 
 
 @app.route("/android/devices/<device_id>/commands/<command_id>/cancel", methods=["POST"])

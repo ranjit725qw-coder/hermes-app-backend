@@ -1640,11 +1640,8 @@ a:hover { text-decoration: underline; }
       <div class="setting-desc">Visible local control switch for this paired Android companion. Turning it off stops polling and cancels any pending selector capture.</div>
       <button class="settings-pairing-action" id="nativeHermesControlBtn" type="button" aria-pressed="false">Hermes Control: Off</button>
       <div class="settings-companion-status" id="nativeHermesControlStatus">Available in the Hermes Android app.</div>
-      <button class="settings-pairing-action settings-companion-action" id="nativePairDeviceBtn" type="button">Pair This Android Device</button>
-      <div class="setting-desc">Generate a one-time code, then enter it in the secure native pairing dialog. The code is not a password or account credential.</div>
-      <button class="settings-pairing-action settings-companion-action" id="generatePairingCodeBtn" type="button">Generate one-time pairing code</button>
-      <div class="settings-pairing-code" id="pairingCodeValue" hidden aria-live="polite"></div>
-      <div class="settings-pairing-note" id="pairingCodeStatus">Sign in to generate a short-lived code. The companion remains default-deny until a separately reviewed profile is available.</div>
+      <button class="settings-pairing-action settings-companion-action" id="connectAndroidDeviceBtn" type="button">Connect Android Device</button>
+      <div class="settings-pairing-note" id="androidConnectStatus">Sign in, then connect this Android device once. The native app verifies the device key; no pairing code is displayed or entered.</div>
       <button class="settings-pairing-action settings-companion-action" id="nativeConnectionTestBtn" type="button">Run Connection Test</button>
       <button class="settings-pairing-action settings-companion-action" id="nativeAutomationSettingsBtn" type="button">Android Automation Settings</button>
       <button class="settings-pairing-action settings-companion-action" id="nativeProfileReviewBtn" type="button">Review Settings Profile</button>
@@ -1809,12 +1806,10 @@ a:hover { text-decoration: underline; }
     closeHistoryBtn: $('#closeHistoryBtn'),
     historyList: $('#historyList'),
     logoutBtn: $('#logoutBtn'),
-    generatePairingCodeBtn: $('#generatePairingCodeBtn'),
-    pairingCodeValue: $('#pairingCodeValue'),
-    pairingCodeStatus: $('#pairingCodeStatus'),
+    connectAndroidDeviceBtn: $('#connectAndroidDeviceBtn'),
+    androidConnectStatus: $('#androidConnectStatus'),
     nativeHermesControlBtn: $('#nativeHermesControlBtn'),
     nativeHermesControlStatus: $('#nativeHermesControlStatus'),
-    nativePairDeviceBtn: $('#nativePairDeviceBtn'),
     nativeConnectionTestBtn: $('#nativeConnectionTestBtn'),
     nativeAutomationSettingsBtn: $('#nativeAutomationSettingsBtn'),
     nativeProfileReviewBtn: $('#nativeProfileReviewBtn'),
@@ -1921,9 +1916,8 @@ a:hover { text-decoration: underline; }
     elements.closeHistoryBtn.addEventListener('click', closeHistory);
     elements.historyOverlay.addEventListener('click', closeHistory);
     if (elements.logoutBtn) elements.logoutBtn.addEventListener('click', handleLogout);
-    if (elements.generatePairingCodeBtn) elements.generatePairingCodeBtn.addEventListener('click', generateAndroidPairingCode);
+    if (elements.connectAndroidDeviceBtn) elements.connectAndroidDeviceBtn.addEventListener('click', connectAndroidDevice);
     if (elements.nativeHermesControlBtn) elements.nativeHermesControlBtn.addEventListener('click', toggleNativeHermesControl);
-    if (elements.nativePairDeviceBtn) elements.nativePairDeviceBtn.addEventListener('click', () => invokeNativeCompanionAction('openCompanionPairing', 'Pairing is available in the Hermes Android app.'));
     if (elements.nativeConnectionTestBtn) elements.nativeConnectionTestBtn.addEventListener('click', () => invokeNativeCompanionAction('runCompanionConnectionTest', 'Connection Test is available in the Hermes Android app.'));
     if (elements.nativeAutomationSettingsBtn) elements.nativeAutomationSettingsBtn.addEventListener('click', () => invokeNativeCompanionAction('openAndroidAutomationSettings', 'Android Automation Settings are available in the Hermes Android app.'));
     if (elements.nativeProfileReviewBtn) elements.nativeProfileReviewBtn.addEventListener('click', () => invokeNativeCompanionAction('reviewSettingsProfile', 'Profile Review is available in the Hermes Android app.'));
@@ -2101,41 +2095,34 @@ a:hover { text-decoration: underline; }
     elements.settingsDrawer.classList.remove('open');
     elements.settingsOverlay.classList.remove('open');
     document.body.style.overflow = '';
-    clearAndroidPairingCode();
   }
 
-  function clearAndroidPairingCode() {
-    if (!elements.pairingCodeValue || !elements.pairingCodeStatus) return;
-    elements.pairingCodeValue.textContent = '';
-    elements.pairingCodeValue.hidden = true;
-    elements.pairingCodeStatus.textContent = hasAuthenticatedSession()
-      ? 'Generate a short-lived code, then enter it only in the native Hermes companion dialog.'
-      : 'Sign in to generate a short-lived code. The companion remains default-deny until a separately reviewed profile is available.';
-  }
-
-  async function generateAndroidPairingCode() {
+  async function connectAndroidDevice() {
     if (!hasAuthenticatedSession()) {
-      showToast('Sign in to generate a pairing code.', 'info');
+      showToast('Sign in before connecting this Android device.', 'info');
       return;
     }
-    const button = elements.generatePairingCodeBtn;
+    const bridge = nativeCompanionBridge();
+    if (!bridge || typeof bridge.connectAndroidDevice !== 'function') {
+      showToast('Connect Android Device is available in the Hermes Android app.', 'info');
+      return;
+    }
+    const button = elements.connectAndroidDeviceBtn;
     button.disabled = true;
-    button.textContent = 'Generating…';
+    button.textContent = 'Connecting…';
+    if (elements.androidConnectStatus) elements.androidConnectStatus.textContent = 'Preparing a one-time secure connection handoff…';
     try {
       const result = await historyFetch('/android/devices/pairing-session', { method: 'POST' });
-      const code = String(result.pairing_code || '').replace(/[^A-Z2-9]/g, '');
-      if (code.length !== 20) throw new Error('Pairing code was unavailable.');
-      elements.pairingCodeValue.textContent = code;
-      elements.pairingCodeValue.hidden = false;
-      const expires = Number(result.expires_at || 0) * 1000;
-      const expiryText = expires > Date.now() ? new Date(expires).toLocaleTimeString() : 'soon';
-      elements.pairingCodeStatus.textContent = 'Enter this code in the native companion before ' + expiryText + '. It can be used once and is not retained here after Settings closes.';
+      const handoff = String(result.pairing_code || '').replace(/[^A-Z2-9]/g, '');
+      if (handoff.length !== 20) throw new Error('Enrollment handoff was unavailable.');
+      bridge.connectAndroidDevice(handoff);
+      if (elements.androidConnectStatus) elements.androidConnectStatus.textContent = 'Confirm Connect in the native Android dialog. The handoff is one-time and is not displayed or stored here.';
     } catch (_) {
-      clearAndroidPairingCode();
-      showToast('A pairing code could not be generated. Please try again.', 'error');
+      if (elements.androidConnectStatus) elements.androidConnectStatus.textContent = 'The secure connection handoff could not be prepared. Try Connect Android Device again after signing in.';
+      showToast('Android device connection could not be started. Please try again.', 'error');
     } finally {
       button.disabled = false;
-      button.textContent = 'Generate one-time pairing code';
+      button.textContent = 'Connect Android Device';
     }
   }
 

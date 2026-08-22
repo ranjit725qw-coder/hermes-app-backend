@@ -22,6 +22,12 @@ from typing import Callable, Dict, Optional
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from android_device_repository import (
+    DeviceEnrollmentRepository,
+    DeviceRepositoryError,
+    DurableDeviceRecord,
+    InMemoryDeviceEnrollmentRepository,
+)
 
 
 PAIRING_TTL_SECONDS = 5 * 60
@@ -123,20 +129,28 @@ def connection_test_payload(device_id, request_nonce, sequence, expires_at) -> b
     )
 
 
+def device_recovery_payload(device_id, recovery_nonce, sequence, expires_at) -> bytes:
+    """Canonical Keystore proof for an already-enrolled device only."""
+    return _canonical(
+        {
+            "device_id": device_id,
+            "expires_at": int(expires_at),
+            "recovery_nonce": recovery_nonce,
+            "schema": "hermes-android-phase2-device-recovery-v1",
+            "sequence": int(sequence),
+        }
+    )
+
+
 class AndroidDeviceBroker:
-    """Owner-scoped in-memory registry for local Phase 1 validation only.
+    """Owner-scoped registry with ephemeral pairing and durable public identities."""
 
-    The deliberately process-local lifetime mirrors the local-only scope. A
-    future durable registry requires separate approval, schema/RLS design, and
-    deployment review; no existing chat table is reused for device identity.
-    """
-
-    def __init__(self, now: Callable[[], float] = time.time):
+    def __init__(self, now: Callable[[], float] = time.time, repository: Optional[DeviceEnrollmentRepository] = None):
         self._now = now
         self._lock = threading.RLock()
         self._pairings: Dict[str, Dict[str, object]] = {}
         self._pairing_code_index: Dict[str, str] = {}
-        self._devices: Dict[str, RegisteredDevice] = {}
+        self._repository = repository or InMemoryDeviceEnrollmentRepository()
         self._used_receipt_nonces = set()
 
     def issue_pairing_challenge(self, owner_id: str) -> PairingChallenge:
@@ -267,23 +281,26 @@ class AndroidDeviceBroker:
             public_key_der=public_key_der,
             registered_at=int(self._now()),
         )
-        self._devices[device.device_id] = device
+        try:
+            # One owner has exactly one active Android companion. A fresh
+            # explicit enrollment revokes its prior device instead of creating
+            # an ambiguous command target.
+            self._repository.revoke_active_for_owner(owner_id, int(self._now()))
+            self._repository.save(self._to_record(device))
+        except DeviceRepositoryError as exc:
+            raise AndroidDeviceBrokerError("durable_registry_unavailable") from exc
         return device
 
     def list_devices(self, owner_id: str):
         owner_id = self._required_id(owner_id, "owner")
         with self._lock:
-            return [
-                self.public_device_view(device)
-                for device in self._devices.values()
-                if device.owner_id == owner_id
-            ]
+            return [self.public_device_view(device) for device in self._owner_devices(owner_id)]
 
     def single_active_device_for_owner(self, owner_id: str) -> str:
         """Return exactly one active device for an owner or fail closed on zero/many."""
         owner_id = self._required_id(owner_id, "owner")
         with self._lock:
-            active = [device.device_id for device in self._devices.values() if device.owner_id == owner_id and device.revoked_at is None]
+            active = [device.device_id for device in self._owner_devices(owner_id) if device.revoked_at is None]
             if len(active) != 1:
                 raise AndroidDeviceBrokerError("single_active_device_required")
             return active[0]
@@ -292,12 +309,12 @@ class AndroidDeviceBroker:
         owner_id = self._required_id(owner_id, "owner")
         device_id = self._required_id(device_id, "device")
         with self._lock:
-            device = self._devices.get(device_id)
+            device = self._device(device_id)
             if not device or device.owner_id != owner_id:
                 return False
             if device.revoked_at is not None:
                 return True
-            self._devices[device_id] = RegisteredDevice(
+            self._save_device(RegisteredDevice(
                 device_id=device.device_id,
                 owner_id=device.owner_id,
                 label=device.label,
@@ -305,7 +322,7 @@ class AndroidDeviceBroker:
                 registered_at=device.registered_at,
                 revoked_at=int(self._now()),
                 last_sequence=device.last_sequence,
-            )
+            ))
             return True
 
     def verify_identity_receipt(
@@ -331,7 +348,7 @@ class AndroidDeviceBroker:
             raise AndroidDeviceBrokerError("receipt_expired")
 
         with self._lock:
-            device = self._devices.get(device_id)
+            device = self._device(device_id)
             if not device or device.revoked_at is not None:
                 raise AndroidDeviceBrokerError("device_unavailable")
             nonce_key = f"{device_id}:{receipt_nonce}"
@@ -342,16 +359,8 @@ class AndroidDeviceBroker:
                 identity_receipt_payload(device_id, receipt_nonce, sequence, expires_at, safe_event_code),
                 signature_b64,
             )
+            self._advance_sequence(device_id, sequence)
             self._used_receipt_nonces.add(nonce_key)
-            self._devices[device_id] = RegisteredDevice(
-                device_id=device.device_id,
-                owner_id=device.owner_id,
-                label=device.label,
-                public_key_der=device.public_key_der,
-                registered_at=device.registered_at,
-                revoked_at=device.revoked_at,
-                last_sequence=sequence,
-            )
             return True
 
     def assert_active_owner(self, owner_id: str, device_id: str) -> None:
@@ -359,7 +368,7 @@ class AndroidDeviceBroker:
         owner_id = self._required_id(owner_id, "owner")
         device_id = self._required_id(device_id, "device")
         with self._lock:
-            device = self._devices.get(device_id)
+            device = self._device(device_id)
             if not device or device.owner_id != owner_id or device.revoked_at is not None:
                 raise AndroidDeviceBrokerError("device_unavailable")
 
@@ -367,7 +376,7 @@ class AndroidDeviceBroker:
         """Return a device's registered owner only after revocation checks."""
         device_id = self._required_id(device_id, "device")
         with self._lock:
-            device = self._devices.get(device_id)
+            device = self._device(device_id)
             if not device or device.revoked_at is not None:
                 raise AndroidDeviceBrokerError("device_unavailable")
             return device.owner_id
@@ -379,19 +388,15 @@ class AndroidDeviceBroker:
         if not isinstance(sequence, int) or sequence <= 0 or not isinstance(payload, bytes):
             raise AndroidDeviceBrokerError("receipt_invalid")
         with self._lock:
-            device = self._devices.get(device_id)
+            device = self._device(device_id)
             if not device or device.revoked_at is not None:
                 raise AndroidDeviceBrokerError("device_unavailable")
             nonce_key = f"{device_id}:{receipt_nonce}"
             if nonce_key in self._used_receipt_nonces or sequence <= device.last_sequence:
                 raise AndroidDeviceBrokerError("receipt_replayed")
             self._verify_signature(device.public_key_der, payload, signature_b64)
+            self._advance_sequence(device_id, sequence)
             self._used_receipt_nonces.add(nonce_key)
-            self._devices[device_id] = RegisteredDevice(
-                device_id=device.device_id, owner_id=device.owner_id, label=device.label,
-                public_key_der=device.public_key_der, registered_at=device.registered_at,
-                revoked_at=device.revoked_at, last_sequence=sequence,
-            )
 
     def verify_device_poll(
         self,
@@ -444,6 +449,33 @@ class AndroidDeviceBroker:
         )
         return "paired_companion_reachable"
 
+    def recover_device(self, device_id: str, recovery_nonce: str, sequence: int, expires_at: int, signature_b64: str) -> RegisteredDevice:
+        """Accept a new liveness proof only from the already registered key.
+
+        Recovery never creates an enrollment, changes owner binding, or restores
+        a revoked record. Thus missing Android app state cannot silently pair.
+        """
+        device_id = self._required_id(device_id, "device")
+        recovery_nonce = self._required_id(recovery_nonce, "recovery nonce")
+        now = int(self._now())
+        if not isinstance(sequence, int) or sequence <= 0 or not isinstance(expires_at, int) or expires_at <= now or expires_at > now + MAX_IDENTITY_RECEIPT_TTL_SECONDS:
+            raise AndroidDeviceBrokerError("request_expired")
+        with self._lock:
+            device = self._device(device_id)
+            if not device or device.revoked_at is not None:
+                raise AndroidDeviceBrokerError("device_unavailable")
+            nonce_key = f"{device_id}:{recovery_nonce}"
+            if nonce_key in self._used_receipt_nonces or sequence <= device.last_sequence:
+                raise AndroidDeviceBrokerError("receipt_replayed")
+            self._verify_signature(
+                device.public_key_der,
+                device_recovery_payload(device_id, recovery_nonce, sequence, expires_at),
+                signature_b64,
+            )
+            self._advance_sequence(device_id, sequence)
+            self._used_receipt_nonces.add(nonce_key)
+            return self._device(device_id) or device
+
     @staticmethod
     def public_device_view(device: RegisteredDevice) -> Dict[str, object]:
         return {
@@ -452,6 +484,55 @@ class AndroidDeviceBroker:
             "registered_at": device.registered_at,
             "status": "revoked" if device.revoked_at is not None else "active",
         }
+
+    def _owner_devices(self, owner_id: str):
+        try:
+            return [self._from_record(record) for record in self._repository.list_owner(owner_id)]
+        except DeviceRepositoryError as exc:
+            raise AndroidDeviceBrokerError("durable_registry_unavailable") from exc
+
+    def _device(self, device_id: str) -> Optional[RegisteredDevice]:
+        try:
+            record = self._repository.get(device_id)
+        except DeviceRepositoryError as exc:
+            raise AndroidDeviceBrokerError("durable_registry_unavailable") from exc
+        return self._from_record(record) if record else None
+
+    def _save_device(self, device: RegisteredDevice) -> None:
+        try:
+            self._repository.save(self._to_record(device))
+        except DeviceRepositoryError as exc:
+            raise AndroidDeviceBrokerError("durable_registry_unavailable") from exc
+
+    def _advance_sequence(self, device_id: str, sequence: int) -> RegisteredDevice:
+        try:
+            return self._from_record(self._repository.advance_sequence(device_id, sequence))
+        except DeviceRepositoryError as exc:
+            raise AndroidDeviceBrokerError("receipt_replayed") from exc
+
+    @staticmethod
+    def _from_record(record: DurableDeviceRecord) -> RegisteredDevice:
+        return RegisteredDevice(
+            device_id=record.device_id,
+            owner_id=record.owner_id,
+            label=record.label,
+            public_key_der=record.public_key_der,
+            registered_at=record.registered_at,
+            revoked_at=record.revoked_at,
+            last_sequence=record.last_sequence,
+        )
+
+    @staticmethod
+    def _to_record(device: RegisteredDevice) -> DurableDeviceRecord:
+        return DurableDeviceRecord(
+            device_id=device.device_id,
+            owner_id=device.owner_id,
+            label=device.label,
+            public_key_der=device.public_key_der,
+            registered_at=device.registered_at,
+            revoked_at=device.revoked_at,
+            last_sequence=device.last_sequence,
+        )
 
     @staticmethod
     def _required_id(value: object, _field: str) -> str:
