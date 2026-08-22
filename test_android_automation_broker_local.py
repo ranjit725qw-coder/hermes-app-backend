@@ -5,10 +5,14 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from android_automation_broker import (
+    ACTION_EXECUTION_VERIFIED,
     ANDROID_SAFE_EVENT_SUCCESS,
     AndroidAutomationBroker,
     AndroidAutomationBrokerError,
     AndroidPackageProfile,
+    LAUNCH_EXECUTION_FOREGROUND_TIMEOUT,
+    LAUNCH_EXECUTION_INTENT_UNAVAILABLE,
+    LAUNCH_EXECUTION_VERIFIED,
     android_receipt_payload,
 )
 from android_device_broker import AndroidDeviceBroker, registration_payload
@@ -146,6 +150,7 @@ class AndroidAutomationBrokerTest(unittest.TestCase):
                 1,
                 self.now + 30,
                 ANDROID_SAFE_EVENT_SUCCESS,
+                ACTION_EXECUTION_VERIFIED,
                 "not-a-valid-signature",
             )
 
@@ -163,6 +168,7 @@ class AndroidAutomationBrokerTest(unittest.TestCase):
                 1,
                 expiry,
                 ANDROID_SAFE_EVENT_SUCCESS,
+                ACTION_EXECUTION_VERIFIED,
             ),
         )
         receipt = self.broker.verify_device_receipt(
@@ -173,6 +179,7 @@ class AndroidAutomationBrokerTest(unittest.TestCase):
             1,
             expiry,
             ANDROID_SAFE_EVENT_SUCCESS,
+            ACTION_EXECUTION_VERIFIED,
             signature,
         )
         self.assertEqual("completed", receipt.observed_state)
@@ -186,8 +193,62 @@ class AndroidAutomationBrokerTest(unittest.TestCase):
                 1,
                 expiry,
                 ANDROID_SAFE_EVENT_SUCCESS,
+                ACTION_EXECUTION_VERIFIED,
                 signature,
             )
+
+    def test_open_app_receipt_category_is_allowlisted_and_signature_bound(self):
+        pending = self.request("OPEN_APP", "open")
+        self.broker.next_for_device(self.device.device_id)
+        receipt_nonce = "receipt-launch"
+        expiry = self.now + 30
+        signature = _sign(
+            self.private_key,
+            android_receipt_payload(
+                pending,
+                receipt_nonce,
+                1,
+                expiry,
+                "android_action_failed",
+                LAUNCH_EXECUTION_FOREGROUND_TIMEOUT,
+            ),
+        )
+        with self.assertRaisesRegex(AndroidAutomationBrokerError, "receipt_invalid"):
+            self.broker.verify_device_receipt(
+                self.owner_a,
+                self.device.device_id,
+                pending.command.command_id,
+                receipt_nonce,
+                1,
+                expiry,
+                "android_action_failed",
+                LAUNCH_EXECUTION_INTENT_UNAVAILABLE,
+                signature,
+            )
+        with self.assertRaisesRegex(AndroidAutomationBrokerError, "receipt_execution_category_invalid"):
+            self.broker.verify_device_receipt(
+                self.owner_a,
+                self.device.device_id,
+                pending.command.command_id,
+                receipt_nonce,
+                1,
+                expiry,
+                "android_action_failed",
+                "launch_not_allowlisted",
+                signature,
+            )
+        receipt = self.broker.verify_device_receipt(
+            self.owner_a,
+            self.device.device_id,
+            pending.command.command_id,
+            receipt_nonce,
+            1,
+            expiry,
+            "android_action_failed",
+            LAUNCH_EXECUTION_FOREGROUND_TIMEOUT,
+            signature,
+        )
+        self.assertEqual("android_action_failed", receipt.safe_event_code)
 
     def test_revoked_device_cannot_receive_a_pending_command(self):
         self.request()

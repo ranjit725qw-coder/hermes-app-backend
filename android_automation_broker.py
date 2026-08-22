@@ -22,6 +22,21 @@ from tool_contracts import ToolCommand, ToolReceipt
 ANDROID_TOOL_ID = "android_companion"
 ANDROID_SAFE_EVENT_SUCCESS = "android_action_verified"
 ANDROID_SAFE_EVENT_FAILURE = "android_action_failed"
+ACTION_EXECUTION_VERIFIED = "action_verified"
+ACTION_EXECUTION_FAILED = "action_failed"
+LAUNCH_EXECUTION_VERIFIED = "launch_verified"
+LAUNCH_EXECUTION_POLICY_DENIED = "launch_policy_denied"
+LAUNCH_EXECUTION_INTENT_UNAVAILABLE = "launch_intent_unavailable"
+LAUNCH_EXECUTION_START_REJECTED = "launch_start_rejected"
+LAUNCH_EXECUTION_FOREGROUND_TIMEOUT = "launch_foreground_timeout"
+LAUNCH_EXECUTION_INTERRUPTED = "launch_interrupted"
+LAUNCH_FAILURE_CATEGORIES = frozenset({
+    LAUNCH_EXECUTION_POLICY_DENIED,
+    LAUNCH_EXECUTION_INTENT_UNAVAILABLE,
+    LAUNCH_EXECUTION_START_REJECTED,
+    LAUNCH_EXECUTION_FOREGROUND_TIMEOUT,
+    LAUNCH_EXECUTION_INTERRUPTED,
+})
 MAX_COMMAND_TTL_SECONDS = 120
 MAX_TEXT_LENGTH = 256
 ALLOWED_ACTIONS = frozenset({"OPEN_APP", "OBSERVE", "TAP", "SCROLL", "BACK", "TYPE"})
@@ -76,14 +91,22 @@ def android_command_payload(command: PendingAndroidCommand) -> bytes:
     )
 
 
-def android_receipt_payload(command: PendingAndroidCommand, receipt_nonce: str, sequence: int, expires_at: int, outcome: str) -> bytes:
+def android_receipt_payload(
+    command: PendingAndroidCommand,
+    receipt_nonce: str,
+    sequence: int,
+    expires_at: int,
+    outcome: str,
+    execution_category: str,
+) -> bytes:
     return _canonical(
         {
             "command_sha256": hashlib.sha256(android_command_payload(command)).hexdigest(),
+            "execution_category": execution_category,
             "expires_at": int(expires_at),
             "outcome": outcome,
             "receipt_nonce": receipt_nonce,
-            "schema": "hermes-android-phase2-receipt-v1",
+            "schema": "hermes-android-phase2-receipt-v2",
             "sequence": int(sequence),
         }
     )
@@ -201,6 +224,7 @@ class AndroidAutomationBroker:
         sequence: int,
         expires_at: int,
         outcome: str,
+        execution_category: str,
         signature: str,
     ) -> ToolReceipt:
         outcome = str(outcome or "")
@@ -213,11 +237,19 @@ class AndroidAutomationBroker:
             pending = self._pending.get(str(command_id or ""))
             if not pending or pending.device_id != device_id or pending.command.owner_id != owner_id or pending.cancelled or pending.expires_at <= now:
                 raise AndroidAutomationBrokerError("command_unavailable")
+            if not self._execution_category_allowed(pending.action, outcome, execution_category):
+                raise AndroidAutomationBrokerError("receipt_execution_category_invalid")
             receipt_key = f"{device_id}:{receipt_nonce}"
             if receipt_key in self._used_receipts:
                 raise AndroidAutomationBrokerError("receipt_replayed")
             try:
-                self._devices.verify_device_payload(device_id, receipt_nonce, sequence, android_receipt_payload(pending, receipt_nonce, sequence, expires_at, outcome), signature)
+                self._devices.verify_device_payload(
+                    device_id,
+                    receipt_nonce,
+                    sequence,
+                    android_receipt_payload(pending, receipt_nonce, sequence, expires_at, outcome, execution_category),
+                    signature,
+                )
             except AndroidDeviceBrokerError as exc:
                 raise AndroidAutomationBrokerError("receipt_invalid") from exc
             self._used_receipts.add(receipt_key)
@@ -241,6 +273,21 @@ class AndroidAutomationBroker:
         marker = (receipt.command_id, receipt.action_digest, receipt.receipt_signature)
         with self._lock:
             return marker in self._verified_receipts and receipt.command_id == command.command_id
+
+    @staticmethod
+    def _execution_category_allowed(action: str, outcome: str, execution_category: object) -> bool:
+        category = str(execution_category or "")
+        if action == "OPEN_APP":
+            return (
+                outcome == ANDROID_SAFE_EVENT_SUCCESS and category == LAUNCH_EXECUTION_VERIFIED
+            ) or (
+                outcome == ANDROID_SAFE_EVENT_FAILURE and category in LAUNCH_FAILURE_CATEGORIES
+            )
+        return (
+            outcome == ANDROID_SAFE_EVENT_SUCCESS and category == ACTION_EXECUTION_VERIFIED
+        ) or (
+            outcome == ANDROID_SAFE_EVENT_FAILURE and category == ACTION_EXECUTION_FAILED
+        )
 
     @staticmethod
     def _required(value: object, _field: str) -> str:

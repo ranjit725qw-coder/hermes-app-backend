@@ -1017,7 +1017,7 @@ def _accept_android_command_receipt(owner_id, device_id, command_id, data):
     try:
         receipt = ANDROID_AUTOMATION_BROKER.verify_device_receipt(
             owner_id, device_id, command_id, data.get("receipt_nonce"), data.get("sequence"),
-            data.get("expires_at"), data.get("outcome"), data.get("signature"),
+            data.get("expires_at"), data.get("outcome"), data.get("execution_category"), data.get("signature"),
         )
         with RUN_REGISTRY_LOCK:
             run = RUN_REGISTRY.get(receipt.run_id)
@@ -1027,6 +1027,11 @@ def _accept_android_command_receipt(owner_id, device_id, command_id, data):
         result = TOOL_EXECUTOR.accept_verified_deferred_receipt(command, receipt, ANDROID_AUTOMATION_BROKER)
         if result.code != "verified_device_receipt":
             return _android_automation_failure()
+        app.logger.warning(
+            "android_open_app_receipt outcome=%s execution_category=%s",
+            receipt.safe_event_code,
+            data.get("execution_category"),
+        )
     except (AndroidAutomationBrokerError, AndroidDeviceBrokerError, ValueError):
         return _android_automation_failure()
     return jsonify({"status": "verified_receipt"})
